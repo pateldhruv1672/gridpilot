@@ -2,7 +2,8 @@
 """Versioned configuration store: a real git repository of YAML infrastructure config.
 Candidates are built in an isolated git worktree; only validated candidates are committed to main."""
 import os, subprocess, shutil, yaml, json, time, uuid
-REPO = "/workspace/gridpilot/config-repo"
+DATA = os.environ.get("GRIDPILOT_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.join(DATA, "config-repo")
 
 def git(*args, cwd=None, check=True):
     r = subprocess.run(["git", *args], cwd=cwd or REPO, capture_output=True, text=True)

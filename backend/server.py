@@ -5,10 +5,16 @@ from collections import deque
 from aiohttp import web, WSMsgType
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sim as S, configstore as CS, engine as E, finance as FIN, policy as POL, voice as V, integrations as IX
-from env import get_user_id
+LOCAL = os.environ.get("GRIDPILOT_LOCAL") == "1"
+try:
+    from env import get_user_id          # Mana sandbox
+except ImportError:
+    LOCAL = True
+    get_user_id = lambda: os.environ.get("GRIDPILOT_OWNER", "local-operator")
+CODE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 PORT = int(os.environ.get("GRIDPILOT_PORT", "8787"))
-STATE = "/workspace/gridpilot/state"
+STATE = os.path.join(os.environ.get("GRIDPILOT_HOME") or CODE_ROOT, "state")
 OWNER = get_user_id()
 os.makedirs(STATE, exist_ok=True)
 
@@ -42,14 +48,18 @@ def safej(t):
     except Exception: return {"_unparsed": (t or "")[:500]}
 
 def jresp(x, status=200): return web.Response(text=E.jd(x), status=status, content_type="application/json")
+def sender(req):
+    # Mana forward-auth sets a verified X-Sender-Uid. Local mode binds to 127.0.0.1 and treats the local user as the operator.
+    return req.headers.get("X-Sender-Uid") or (OWNER if LOCAL else None)
+
 def owner_only(req):
-    if req.headers.get("X-Sender-Uid") != OWNER:
+    if sender(req) != OWNER:
         raise web.HTTPForbidden(text=json.dumps({"error": "owner authentication required"}), content_type="application/json")
     return OWNER
 
 def viewer(req):
     """Any signed-in Mana user (verified by forward-auth) may watch. Approvals, settings and payments stay owner-only."""
-    u = req.headers.get("X-Sender-Uid")
+    u = sender(req)
     if not u: raise web.HTTPUnauthorized(text=json.dumps({"error": "sign in to Mana to view"}), content_type="application/json")
     return u
 
@@ -165,6 +175,9 @@ async def sim_loop():
 
 async def ingress_refresher():
     while True:
+        if LOCAL:
+            ENG.public_base = (os.environ.get("PUBLIC_BASE_URL") or "").rstrip("/") or None   # a tunnel URL, needed only for CREAO/Cartesia callbacks
+            await asyncio.sleep(3600); continue
         try:
             from ingress.utils import mint_ingress_token
             m = await asyncio.to_thread(mint_ingress_token, "gridpilot", 30 * 86400)
@@ -336,7 +349,7 @@ async def api_test(req):
         ENG.db.set("cartesia_verified", {"ok": False, "at": time.time(), "error": str(e)[:300]}); out["cartesia"] = {"ok": False, "detail": str(e)[:300]}
     try:
         ENG._cli_checked = 0
-        if not ENG.creao_config()["cli"]: raise IX.ProviderError("CREAO Developer Platform key (CREAO_CLI_KEY, cr_sk_) not saved")
+        if not ENG.creao_config()["cli"]: raise IX.ProviderError("CREAO Developer Platform key not available (%s)" % ("set environment variable CREAO_CLI_KEY" if LOCAL else "save CREAO_CLI_KEY, cr_sk_..."))
         me = await asyncio.to_thread(IX.cli_me); r = await asyncio.to_thread(IX.cli_list_agents)
         ENG.db.set("creao_cli_verified", {"ok": True, "at": time.time(), "project": me.get("projectId")})
         out["creao_cli"] = {"ok": True, "detail": "CREAO /v2 project %s; %d hosted agents; agent creation available" % ((me.get("projectId") or "")[:8], len(r.get("agents", [])))}
@@ -675,10 +688,16 @@ async def on_start(app):
     for c in (sim_loop(), ENG.creao_poller(), ENG.cli_poller(), V.poller(ENG), ingress_refresher()):
         t = loop.create_task(c); ENG.bg.add(t)
 
+async def local_index(req): return web.FileResponse(os.path.join(CODE_ROOT, "frontend", "local", "index.html"))
+async def local_app(req): return web.FileResponse(os.path.join(CODE_ROOT, "frontend", "GridpilotApp.jsx"), headers={"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"})
+
 def main():
     app = web.Application(client_max_size=4 * 1024 * 1024)
     app.add_routes(routes); app.on_startup.append(on_start)
-    web.run_app(app, host="127.0.0.1", port=PORT, access_log=None)
+    if LOCAL:
+        app.router.add_get("/", local_index); app.router.add_get("/app.jsx", local_app)
+        print("GRIDPILOT local: open http://127.0.0.1:%d/" % PORT, flush=True)
+    web.run_app(app, host=os.environ.get("GRIDPILOT_HOST", "127.0.0.1"), port=PORT, access_log=None)
 
 if __name__ == "__main__":
     main()

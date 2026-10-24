@@ -1,7 +1,21 @@
 
 """Sponsor adapters. Secrets never touch this process: Mana's symbolic proxy injects them server-side.
 CREAO: app-scoped API Trigger (capi_ key). Cartesia: Managed Agents (sk_car_ key). Contracts from official docs (2026-10)."""
-import json, time, requests, symbolic_proxy
+import json, os, re, time, requests
+LOCAL = os.environ.get("GRIDPILOT_LOCAL") == "1"
+try:
+    import symbolic_proxy            # Mana sandbox: keys are injected server-side and never enter this process
+except ImportError:
+    symbolic_proxy = None
+if LOCAL: symbolic_proxy = None
+
+class _LocalProxy:
+    """Running outside Mana: read keys from environment variables (CREAO_API_KEY, CREAO_CLI_KEY, CARTESIA_API_KEY)."""
+    def __init__(self, url, headers):
+        missing = [m for m in re.findall(r"\$\{secrets\.([A-Z0-9_]+)\}", json.dumps(headers)) if not os.environ.get(m)]
+        if missing: raise RuntimeError("set environment variable(s): " + ", ".join(missing))
+        self.url = url
+        self.headers = {k: re.sub(r"\$\{secrets\.([A-Z0-9_]+)\}", lambda m: os.environ[m.group(1)], v) for k, v in headers.items()}
 
 CARTESIA_VERSION = "2026-08-14"
 
@@ -15,6 +29,7 @@ class _Proxy:
     def get(self):
         if self._p is None:
             try:
+                if symbolic_proxy is None: self._p = _LocalProxy(self.url, self.headers); self.error = None; return self._p
                 self._p = symbolic_proxy.private({"name": self.name, "url": self.url, "method": self.method,
                                                   "allow_subpaths": True, "headers": self.headers})
                 self.error = None

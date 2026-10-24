@@ -69,16 +69,30 @@ Mana user_div (React, three.js twin, ECharts) ── WebSocket/REST ──► ai
 
 Secrets never enter this process or this repo: Mana's server-side proxy injects `CREAO_API_KEY`, `CREAO_CLI_KEY` and `CARTESIA_API_KEY` into outbound requests.
 
-## Run it
+## Run it locally
+
+Needs Python 3.10+ and git. No build step: the backend serves the same UI file that runs in Mana.
 
 ```
-pip install aiohttp numpy pyyaml requests
-python tests/test_finance_desk.py
-python tests/test_incident_flow.py
-cd backend && GRIDPILOT_PORT=8787 python server.py
+git clone https://github.com/pateldhruv1672/gridpilot.git && cd gridpilot
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python tests/test_finance_desk.py                       # 12/12 checks
+python tests/test_incident_flow.py                      # add "fail" to test rollback
+GRIDPILOT_LOCAL=1 python backend/server.py              # then open http://127.0.0.1:8787/
 ```
 
-The full product runs inside Mana (daemon `gridpilot` behind Mana ingress; the UI is `frontend/GridpilotApp.jsx`, a Mana user_div). Outside Mana the backend runs, but the CREAO and Cartesia adapters need Mana's proxy for keys.
+That gives you the full simulator, 3D control room, incident engine, policy, git config store, finance desk and ledger. Use **Demo → degrade C02** to start the R17 incident.
+
+**With the sponsor integrations (optional):**
+
+1. Copy `.env.example` to `.env` and fill in `CREAO_CLI_KEY` (CREAO Developer Platform key, `cr_sk_…`) and `CARTESIA_API_KEY` (`sk_car_…`). Keys are read from the environment and never written anywhere.
+2. CREAO agents and the Cartesia voice agent call back into GRIDPILOT, so expose the server publicly, for example `cloudflared tunnel --url http://127.0.0.1:8787`, and put that URL in `PUBLIC_BASE_URL`.
+3. `set -a; source .env; set +a; python backend/server.py`, then open Connections → **Test connections** (creates the Cartesia agent, tools and phone number) and register the operator's US phone number.
+
+Without keys, incidents stay at "CREAO disconnected" rather than faking an agent.
+
+Local mode binds to 127.0.0.1 and treats you as the operator. Inside Mana the backend runs as the sandbox daemon `gridpilot` behind Mana ingress, identity comes from Mana sign-in, and keys go through Mana's server-side proxy.
 
 ## Known limitations
 

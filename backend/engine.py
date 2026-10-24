@@ -6,7 +6,8 @@ from collections import deque
 import numpy as np
 import sim as S, configstore as CS, policy as POL, finance as FIN, integrations as IX, specialists as SP
 
-DB_PATH = "/workspace/gridpilot/state/gridpilot.db"
+CODE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(os.environ.get("GRIDPILOT_HOME") or CODE_ROOT, "state", "gridpilot.db")
 CRITICAL_TICKS = 3
 RECOVERY_HOLD_S = 30.0
 RECOVERY_DEADLINE_S = 420.0
@@ -890,5 +891,5 @@ class Engine:
 
 
 def SP_REMEDIATION_TEXT():
-    brief = open("/workspace/gridpilot/docs/CREAO_AGENT.md").read()
+    brief = open(os.path.join(CODE_ROOT, "docs", "CREAO_AGENT.md")).read()
     return brief

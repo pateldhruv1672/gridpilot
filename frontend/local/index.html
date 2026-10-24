@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GRIDPILOT (local)</title>
+<!-- No build step: the same GridpilotApp.jsx that runs inside Mana, compiled in the browser with Mana's injected names shimmed. -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+<script type="importmap">
+{ "imports": {
+  "react": "https://esm.sh/react@18.3.1",
+  "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+  "three@0.160.0": "https://esm.sh/three@0.160.0",
+  "echarts@5": "https://esm.sh/echarts@5"
+} }
+</script>
+<style>html,body,#root{margin:0;height:100%;background:#070B13} :root{--mana-app-height:100vh}</style>
+</head>
+<body>
+<div id="root" style="display:flex;align-items:center;justify-content:center;color:#8A9BB0;font:12px ui-monospace,monospace">loading GRIDPILOT…</div>
+<script type="module">
+const SHIM = `
+import React from 'react';
+const ownerId = 'local-operator', userId = 'local-operator';
+const FS = { auth: { currentUser: { getIdToken: async () => 'local' } } };
+function useIngressUrl() { return { url: location.origin, wsUrl: location.origin.replace(/^http/, 'ws'), error: null }; }
+const copyText = async (t) => { try { await navigator.clipboard.writeText(t); return 'copied'; } catch (e) { return 'failed'; } };
+const apiManager = { list: async () => [], save: async () => { throw new Error('Local mode: set CREAO_API_KEY / CREAO_CLI_KEY / CARTESIA_API_KEY as environment variables and restart the backend'); }, delete: async () => {}, get: async () => null };
+`;
+const src = await (await fetch('/app.jsx', { cache: 'no-store' })).text();
+const imports = [], body = [];
+for (const line of src.split('\n')) (/^\s*import\s/.test(line) ? imports : body).push(line);
+const code = imports.join('\n') + '\n' + SHIM + '\n' + body.join('\n') + `
+import { createRoot } from 'react-dom/client';
+createRoot(document.getElementById('root')).render(React.createElement('div', { style: { height: '100vh', display: 'flex', flexDirection: 'column' } }, React.createElement(UserDiv)));
+`;
+const out = Babel.transform(code, { presets: [['react', { runtime: 'classic' }]], sourceType: 'module', filename: 'GridpilotApp.jsx' }).code;
+await import(URL.createObjectURL(new Blob([out], { type: 'text/javascript' })));
+</script>
+</body>
+</html>
