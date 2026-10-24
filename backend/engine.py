@@ -697,6 +697,9 @@ class Engine:
             self.sim.load_config(applied)
             self._step(ex_id, "applied_to_simulator", True, "simulator reloaded configuration %s" % sha[:10])
             self.record_usage(inc_id, ex_id, actions, cfg_now)
+            if getattr(self, "desk", None):
+                try: self.desk.accrue_incident(inc_id, [x for x in (dict(json.loads(u["data"]), kind=u["kind"]) for u in self.db.all("select * from usage where incident_id=?", (inc_id,))) if x.get("execution_id") == ex_id])
+                except Exception: traceback.print_exc()
             self._exec_update(ex_id, "monitoring", applied_sha=sha, applied_at_sim_t=round(self.sim.t, 1))
             inc = self.incident(inc_id)
             inc["monitor"] = {"execution_id": ex_id, "start_sim_t": self.sim.t, "below_since": None, "targets": [a["to_rack"] for a in actions if a["type"] == "migrate_workload"]}
@@ -849,6 +852,9 @@ class Engine:
         inc["finance"] = {"invoice_id": inv_id, "incurred_usd": inv["total_usd"], "reconciliation_status": rec["status"]}
         self.save_incident(inc)
         self.event(inc_id, "invoice_reconciled", "finance-engine", {"invoice_id": inv_id, **rec})
+        if getattr(self, "desk", None):
+            try: self.desk.ingest_incident_invoice(inc_id, inv, usage)
+            except Exception: traceback.print_exc()
         self.transition(inc, "CLOSED", "backend", "incident closed; invoice %s %s" % (inv_id, rec["status"]))
         if rec.get("status") != "RECONCILED":
             self.spawn(self.spawn_specialist(inc_id, "finops_auditor", "Invoice %s did not reconcile (%s). Attribute the variance and state what to dispute." % (inv_id, rec.get("status")),
