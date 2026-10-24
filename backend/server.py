@@ -685,6 +685,8 @@ async def voice_tool(req):
 
 async def on_start(app):
     loop = asyncio.get_event_loop()
+    try: await asyncio.to_thread(ENG.creao_config)
+    except Exception: traceback.print_exc()
     for c in (sim_loop(), ENG.creao_poller(), ENG.cli_poller(), V.poller(ENG), ingress_refresher()):
         t = loop.create_task(c); ENG.bg.add(t)
 
