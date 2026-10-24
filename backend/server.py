@@ -29,6 +29,14 @@ OPTIONS = {}           # incident -> list of evaluated options (summaries) for c
 DIRTY = {"v": True}
 ENG.notify = lambda: DIRTY.__setitem__("v", True)
 
+def clipj(x, n=6000):
+    t = E.jd(x)
+    return t if len(t) <= n else E.jd({"_truncated": True, "chars": len(t), "preview": t[:n - 200]})
+
+def safej(t):
+    try: return json.loads(t or "{}")
+    except Exception: return {"_unparsed": (t or "")[:500]}
+
 def jresp(x, status=200): return web.Response(text=E.jd(x), status=status, content_type="application/json")
 def owner_only(req):
     if req.headers.get("X-Sender-Uid") != OWNER:
@@ -57,7 +65,7 @@ def incident_detail(inc):
         d = json.loads(a["data"]); d.pop("code_plain_for_owner", None); d.pop("code_hash", None); a["data"] = d; approvals.append(a)
     execs = [dict(r, data=json.loads(r["data"])) for r in ENG.db.all("select * from executions where incident_id=? order by created", (iid,))]
     calls = [dict(r, data=json.loads(r["data"])) for r in ENG.db.all("select * from calls where incident_id=? order by created", (iid,))]
-    tools = [dict(r, args=json.loads(r["args"] or "{}"), result=json.loads(r["result"] or "{}")) for r in ENG.db.all("select * from tool_calls where incident_id=? order by id", (iid,))]
+    tools = [dict(r, args=safej(r["args"]), result=safej(r["result"])) for r in ENG.db.all("select * from tool_calls where incident_id=? order by id", (iid,))]
     inv = [dict(json.loads(r["data"]), id=r["id"]) for r in ENG.db.all("select * from invoices where incident_id=?", (iid,))]
     return {**inc, "plans": plans, "agent_runs": runs, "approvals": approvals, "executions": execs, "calls": calls, "tool_calls": tools,
             "invoices": inv, "options": OPTIONS.get(iid, [])}
@@ -313,9 +321,10 @@ async def api_test(req):
         ENG.db.set("cartesia_verified", {"ok": False, "at": time.time(), "error": str(e)[:300]}); out["cartesia"] = {"ok": False, "detail": str(e)[:300]}
     try:
         ENG._cli_checked = 0
-        if not ENG.creao_config()["cli"]: raise IX.ProviderError("CREAO CLI key (CREAO_CLI_KEY, cr_sk_) not saved")
-        r = await asyncio.to_thread(IX.cli_list_agents)
-        ENG.db.set("creao_cli_verified", {"ok": True, "at": time.time()}); out["creao_cli"] = {"ok": True, "detail": "authenticated; agent creation available"}
+        if not ENG.creao_config()["cli"]: raise IX.ProviderError("CREAO Developer Platform key (CREAO_CLI_KEY, cr_sk_) not saved")
+        me = await asyncio.to_thread(IX.cli_me); r = await asyncio.to_thread(IX.cli_list_agents)
+        ENG.db.set("creao_cli_verified", {"ok": True, "at": time.time(), "project": me.get("projectId")})
+        out["creao_cli"] = {"ok": True, "detail": "CREAO /v2 project %s; %d hosted agents; agent creation available" % ((me.get("projectId") or "")[:8], len(r.get("agents", [])))}
     except Exception as e:
         ENG.db.set("creao_cli_verified", {"ok": False, "at": time.time(), "error": str(e)[:300]}); out["creao_cli"] = {"ok": False, "detail": str(e)[:300]}
     DIRTY["v"] = True; return jresp(out)
@@ -470,7 +479,7 @@ async def creao_tool(req):
     except web.HTTPException: raise
     except Exception as e: ok = 0; res = {"error": str(e)[:500]}
     ENG.db.ex("insert into tool_calls(ts,provider,run_ref,incident_id,tool,args,result,ok) values(?,?,?,?,?,?,?,?)",
-              (time.time(), "creao", tok["run_ref"], tok["incident_id"], tool, E.jd(args)[:6000], E.jd(res)[:6000], ok))
+              (time.time(), "creao", tok["run_ref"], tok["incident_id"], tool, clipj(args), clipj(res), ok))
     ENG.event(tok["incident_id"], "agent_tool_call", actor, {"tool": tool, "ok": bool(ok), "run_ref": tok["run_ref"]})
     return jresp(res, 200 if ok else 400)
 
@@ -564,7 +573,7 @@ async def voice_tool(req):
     except Exception as e:
         ok = 0; res = {"error": str(e)[:400]}
     ENG.db.ex("insert into tool_calls(ts,provider,run_ref,incident_id,tool,args,result,ok) values(?,?,?,?,?,?,?,?)",
-              (time.time(), "cartesia", tok["call_id"], iid, tool, E.jd(args)[:4000], E.jd(res)[:6000], ok))
+              (time.time(), "cartesia", tok["call_id"], iid, tool, clipj(args, 4000), clipj(res), ok))
     ENG.event(iid, "voice_tool_call", actor, {"tool": tool, "ok": bool(ok)})
     return jresp(res, 200 if ok else 400)
 

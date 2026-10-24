@@ -98,6 +98,7 @@ async def start_call(engine, inc_id, actor):
             await asyncio.to_thread(ensure_setup, engine)
         token = secrets.token_urlsafe(20)
         engine.call_tokens[token] = {"incident_id": inc_id, "call_id": cid, "operator": op["name"], "expires": time.time() + 3600}
+        engine.db.set("call_tokens", engine.call_tokens)
         body = {"from_number_id": db.get("cartesia_from_number_id"), "agent_id": db.get("cartesia_agent_id"), "ringing_timeout_seconds": 40,
                 "max_call_duration_minutes": 12, "outbound_calls": [{"to_number": op["phone"], "dynamic_variables": {
                     "incident_id": inc_id, "call_token": token, "operator_name": op["name"]}}]}

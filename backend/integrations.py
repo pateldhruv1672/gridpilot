@@ -52,30 +52,48 @@ CART = {m: _Proxy("gp_cartesia_" + m.lower(), "https://api.cartesia.ai", m, dict
 def cartesia(method, path, body=None, timeout=30):
     return CART[method].call(path, body, timeout)
 
-# ---- CREAO CLI (account API, cr_sk_ key): create personal agents on the fly and run them. Docs: docs.creao.ai/developer-api
+# ---- CREAO Developer Platform /v2 (project key, cr_sk_..., USD wallet): hosted agents created on the fly + runs.
+# Contract from developer.creao.ai/docs (2026-10): POST /v2/agents (NL create, 202 {run_id, agent_id:null, created_at}),
+# GET /v2/agents (list), GET /v2/agents/{agent_id}/edits/{run_id} (create/edit run: queued|running|succeeded|failed|cancelled),
+# POST /v2/runs {agent_id?, input, webhook_url?} (omit agent_id = general agent), GET /v2/runs/{run_id}.
 _cli_h = {"authorization": "Bearer ${secrets.CREAO_CLI_KEY}", "content-type": "application/json"}
-CLI_POST = _Proxy("gp_creao_cli_post", "https://developer.creao.ai/v1", "POST", _cli_h)
-CLI_GET = _Proxy("gp_creao_cli_get", "https://developer.creao.ai/v1", "GET", {"authorization": "Bearer ${secrets.CREAO_CLI_KEY}"})
+CLI_POST = _Proxy("gp_creao_v2_post", "https://developer.creao.ai/v2", "POST", _cli_h)
+CLI_GET = _Proxy("gp_creao_v2_get", "https://developer.creao.ai/v2", "GET", {"authorization": "Bearer ${secrets.CREAO_CLI_KEY}"})
 
 def cli_available():
     try: CLI_GET.get(); return True
     except ProviderError: return False
 
+def cli_me():
+    return CLI_GET.call("/me")
+
 def cli_create_agent(description, webhook_url=None, model=None):
     body = {"input": description}
     if webhook_url: body["webhook_url"] = webhook_url
     if model: body["model"] = model
-    return CLI_POST.call("/agents", body, timeout=60)        # {run_id, status, agent_id: null, conversation_id, model}
+    return CLI_POST.call("/agents", body, timeout=60)
+
+def cli_list_agents():
+    return CLI_GET.call("/agents?limit=100")
+
+def cli_creation_status(name, run_id, since_iso, taken):
+    """The create run is only addressable once its agent_id is known: find new agents and confirm the pairing."""
+    agents = cli_list_agents().get("agents", [])
+    cand = [a for a in agents if a["agent_id"] not in taken and (a.get("created_at") or "") >= (since_iso or "")]
+    exact = [a for a in cand if (a.get("name") or "").strip().lower() == (name or "").strip().lower()]
+    for a in sorted(exact, key=lambda a: a["created_at"]) + sorted([a for a in cand if a not in exact], key=lambda a: a["created_at"]):
+        try: e = CLI_GET.call("/agents/%s/edits/%s" % (a["agent_id"], run_id))
+        except ProviderError: continue
+        return {"status": e.get("status"), "agent_id": a["agent_id"], "name": a.get("name"), "error": e.get("error")}
+    return {"status": "running"}
 
 def cli_start_run(agent_id, inp, webhook_url=None, conversation_id=None, model=None):
-    body = {"agent_id": agent_id, "input": inp}
+    body = {"input": inp}
+    if agent_id: body["agent_id"] = agent_id
     if webhook_url: body["webhook_url"] = webhook_url
     if conversation_id: body["conversation_id"] = conversation_id
     if model: body["model"] = model
-    return CLI_POST.call("/runs", body, timeout=60)          # {run_id, status, agent_id, conversation_id, model}
+    return CLI_POST.call("/runs", body, timeout=60)
 
 def cli_get_run(run_id):
-    return CLI_GET.call("/runs/%s" % run_id)                # {run_id, status, agent_id, result{text, agent_id?}, usage}
-
-def cli_list_agents():
-    return CLI_GET.call("/agents")
+    return CLI_GET.call("/runs/%s" % run_id)

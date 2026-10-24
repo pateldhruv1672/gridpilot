@@ -64,8 +64,8 @@ class Engine:
         self.sim = sim; self.owner = owner_uid; self.db = DB()
         self.speed = 2.0; self.paused = False
         self.crit_count = {}; self.series = deque(maxlen=900); self._last_series_t = -99
-        self.tokens = {}            # creao tool token -> {...}
-        self.call_tokens = {}       # voice call token -> {...}
+        self.tokens = {k: v for k, v in (self.db.get("tool_tokens") or {}).items() if v.get("expires", 0) > now()}   # creao tool token -> {...}, persisted
+        self.call_tokens = {k: v for k, v in (self.db.get("call_tokens") or {}).items() if v.get("expires", now() + 1) > now()}
         self.public_base = None     # ingress base URL for external callers
         self.webhook_secret = self.db.get("webhook_secret") or secrets.token_urlsafe(18); self.db.set("webhook_secret", self.webhook_secret)
         self.notify = lambda: None
@@ -200,6 +200,7 @@ class Engine:
             return None
         token = secrets.token_urlsafe(24)
         self.tokens[token] = {"incident_id": inc_id, "task": task, "run_ref": local, "expires": now() + 3600, "allowed": SP.MAIN_TOOLS}
+        self.db.set("tool_tokens", self.tokens)
         sp = self.specialist_summaries(inc_id)
         if sp: extra = dict(extra, specialist_findings=extra.get("specialist_findings") or sp)
         request = {"gridpilot_api": cfg["base"] + "/tools/creao", "tool_token": token, "task": task, "incident_id": inc_id,
@@ -293,7 +294,7 @@ class Engine:
         if row and row["status"] == "creating": return key, None
         res = await asyncio.to_thread(IX.cli_create_agent, text, (self.public_base + "/webhooks/creao/" + self.webhook_secret) if self.public_base else None)
         self.db.ex("insert or replace into specialists values(?,?,?,?,?,?,?,?)", (key, kind, name, None, "creating", res.get("run_id"), now(),
-                   jd({"model": res.get("model"), "conversation_id": res.get("conversation_id"), "brief_chars": len(text)})))
+                   jd({"model": res.get("model"), "conversation_id": res.get("conversation_id"), "brief_chars": len(text), "created_at": res.get("created_at")})))
         self.event(None, "creao_agent_creation_started", "backend", {"key": key, "name": name, "creation_run_id": res.get("run_id")})
         return key, None
 
@@ -332,6 +333,7 @@ class Engine:
         inc = self.incident(inc_id); plan = self.current_plan(inc_id)
         local = "SP-%s" % secrets.token_hex(4); token = secrets.token_urlsafe(24)
         self.tokens[token] = {"incident_id": inc_id, "task": "specialist:" + spec["kind"], "run_ref": local, "expires": now() + 3600, "allowed": SP.READ_TOOLS}
+        self.db.set("tool_tokens", self.tokens)
         request = {"gridpilot_api": cfg["base"] + "/tools/creao", "tool_token": token, "incident_id": inc_id, "question": str(question)[:2000],
                    "specialist": spec["kind"], "context": context or {},
                    "tool_protocol": "POST JSON to <gridpilot_api>/<tool_name> with header 'X-GridPilot-Tool-Token: <tool_token>'. GET <gridpilot_api>/manifest for schemas."}
@@ -364,18 +366,22 @@ class Engine:
         while True:
             await asyncio.sleep(4)
             try:
+                taken = {a["agent_id"] for a in self.db.all("select agent_id from specialists where agent_id is not null")}
                 for a in self.db.all("select * from specialists where status='creating'"):
-                    try: run = await asyncio.to_thread(IX.cli_get_run, a["creation_run_id"])
+                    meta = json.loads(a["data"] or "{}")
+                    try: cs = await asyncio.to_thread(IX.cli_creation_status, a["name"], a["creation_run_id"], meta.get("created_at"), taken)
                     except Exception: continue
-                    st = run.get("status")
-                    if st == "completed":
-                        aid = run.get("agent_id") or (run.get("result") or {}).get("agent_id")
-                        self.db.ex("update specialists set status=?, agent_id=? where key=?", ("ready" if aid else "failed", aid, a["key"]))
-                        self.event(None, "creao_agent_created" if aid else "creao_agent_creation_failed", "creao-cli:" + a["creation_run_id"],
-                                   {"key": a["key"], "name": a["name"], "agent_id": aid, "agent_name": (run.get("result") or {}).get("agent_name")})
+                    st = cs.get("status")
+                    if st in ("succeeded", "completed") and cs.get("agent_id"):
+                        taken.add(cs["agent_id"])
+                        self.db.ex("update specialists set status='ready', agent_id=? where key=?", (cs["agent_id"], a["key"]))
+                        self.event(None, "creao_agent_created", "creao-v2:" + a["creation_run_id"], {"key": a["key"], "name": cs.get("name") or a["name"], "agent_id": cs["agent_id"]})
                     elif st in ("failed", "cancelled"):
                         self.db.ex("update specialists set status='failed' where key=?", (a["key"],))
-                        self.event(None, "creao_agent_creation_failed", "creao-cli:" + a["creation_run_id"], {"key": a["key"], "status": st, "error": run.get("error")})
+                        self.event(None, "creao_agent_creation_failed", "creao-v2:" + a["creation_run_id"], {"key": a["key"], "status": st, "error": cs.get("error")})
+                    elif now() - a["created"] > 900:
+                        self.db.ex("update specialists set status='failed' where key=?", (a["key"],))
+                        self.event(None, "creao_agent_creation_failed", "backend", {"key": a["key"], "error": "no agent appeared within 15 minutes"})
                 for r in self.db.all("select * from agent_runs where provider='creao-cli' and status='awaiting_agent'"):
                     d = json.loads(r["data"] or "{}"); a = self.db.one("select * from specialists where key=?", (d.get("agent_key"),))
                     if a and a["status"] == "ready": await self._start_cli_run(r["id"], a["agent_id"])
