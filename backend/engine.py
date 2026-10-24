@@ -4,7 +4,7 @@ execution against the git config store, recovery monitoring, rollback, finance, 
 import asyncio, copy, hashlib, json, os, secrets, sqlite3, time, traceback
 from collections import deque
 import numpy as np
-import sim as S, configstore as CS, policy as POL, finance as FIN, integrations as IX
+import sim as S, configstore as CS, policy as POL, finance as FIN, integrations as IX, specialists as SP
 
 DB_PATH = "/workspace/gridpilot/state/gridpilot.db"
 CRITICAL_TICKS = 3
@@ -46,6 +46,7 @@ class DB:
         create table if not exists invoices(id text primary key, incident_id text, created real, data text);
         create table if not exists calls(id text primary key, incident_id text, created real, status text, data text);
         create table if not exists settings(k text primary key, v text);
+        create table if not exists specialists(key text primary key, kind text, name text, agent_id text, status text, creation_run_id text, created real, data text);
         """)
         self.c.commit()
     def ex(self, q, a=()):
@@ -72,6 +73,8 @@ class Engine:
         self.cost = self.db.get("cost_accum", {"electricity_usd": 0.0, "lease_usd": 0.0, "transfer_usd": 0.0})
         self._last_energy = sim.energy_kwh
         self.bg = set()
+        self.pending_inputs = {}    # local run ref -> request (contains a tool token; memory only)
+        self._cli_ok = False; self._cli_checked = 0
 
     # ------------------------------------------------------------------ audit
     def event(self, inc_id, typ, actor, data=None):
@@ -170,31 +173,55 @@ class Engine:
 
     # ------------------------------------------------------------------ CREAO orchestration
     def creao_config(self):
-        return {"app_id": self.db.get("creao_app_id"), "base": self.public_base}
+        if now() - self._cli_checked > 30:
+            self._cli_ok = IX.cli_available(); self._cli_checked = now()
+        return {"app_id": self.db.get("creao_app_id"), "base": self.public_base, "cli": self._cli_ok}
 
     async def begin_triage(self, inc_id):
+        inc = self.incident(inc_id)
+        try:
+            snap = self.sim.snapshot(field=False); cfg = self.sim.config
+            hit = [w for w, v in cfg["workloads"].items() if v["rack"] == inc["rack"] and v["customer"] in PROTECTED and snap["latency"].get(w, {}).get("breach")]
+        except Exception: hit = []
+        if hit:
+            self.spawn(self.spawn_specialist(inc_id, "sla_guardian", "Protected-SLA workloads %s are breaching on %s. Assess customer impact and the lowest-risk action set." % (", ".join(hit), inc["rack"]),
+                                             requested_by="backend", context={"breaching": hit}, auto=True))
         await self.start_creao(inc_id, "diagnose_and_plan", {})
 
     async def start_creao(self, inc_id, task, extra):
         inc = self.incident(inc_id)
         cfg = self.creao_config()
         local = "CR-%s" % secrets.token_hex(4)
-        if not cfg["app_id"] or not cfg["base"]:
+        mode = "app" if cfg["app_id"] else ("cli" if cfg["cli"] else None)
+        if not mode or not cfg["base"]:
             self.db.ex("insert into agent_runs values(?,?,?,?,?,?,?,?,?)", (local, "creao", None, inc_id, task, "disconnected", now(), now(),
-                       jd({"error": "CREAO not configured: " + ("missing App ID" if not cfg["app_id"] else "no public tool URL yet")})))
+                       jd({"error": "CREAO not configured: " + ("missing App ID or CREAO CLI key" if not mode else "no public tool URL yet")})))
             self.event(inc_id, "creao_disconnected", "backend", {"task": task, "reason": "not configured"})
             return None
         token = secrets.token_urlsafe(24)
-        self.tokens[token] = {"incident_id": inc_id, "task": task, "run_ref": local, "expires": now() + 3600}
+        self.tokens[token] = {"incident_id": inc_id, "task": task, "run_ref": local, "expires": now() + 3600, "allowed": SP.MAIN_TOOLS}
+        sp = self.specialist_summaries(inc_id)
+        if sp: extra = dict(extra, specialist_findings=extra.get("specialist_findings") or sp)
         request = {"gridpilot_api": cfg["base"] + "/tools/creao", "tool_token": token, "task": task, "incident_id": inc_id,
                    "tool_protocol": "POST JSON to <gridpilot_api>/<tool_name> with header 'X-GridPilot-Tool-Token: <tool_token>'. Call GET <gridpilot_api>/manifest for tool schemas.",
                    **extra}
-        self.db.ex("insert into agent_runs values(?,?,?,?,?,?,?,?,?)", (local, "creao", None, inc_id, task, "starting", now(), None, jd({"request": {**request, "tool_token": "[redacted]"}})))
+        provider = "creao" if mode == "app" else "creao-cli"
+        self.db.ex("insert into agent_runs values(?,?,?,?,?,?,?,?,?)", (local, provider, None, inc_id, task, "starting", now(), None, jd({"request": {**request, "tool_token": "[redacted]"}})))
         if task in ("diagnose_and_plan",) and inc["state"] == "DETECTED":
             self.transition(inc, "TRIAGING", "backend", "CREAO Incident Commander run requested")
         elif task in ("replan_after_failure", "evaluate_alternative") and inc["state"] in ("REPLAN", "DENIED", "ESCALATED"):
             self.transition(inc, "TRIAGING", "backend", "CREAO re-analysis requested (%s)" % task)
         try:
+            if mode == "cli":
+                key, aid = await self.ensure_agent("remediation", "GRIDPILOT Remediation Agent", SP_REMEDIATION_TEXT())
+                d = json.loads(self.db.one("select data from agent_runs where id=?", (local,))["data"]); d["agent_key"] = key
+                self.db.ex("update agent_runs set data=? where id=?", (jd(d), local))
+                self.pending_inputs[local] = request
+                if not aid:
+                    self.db.ex("update agent_runs set status='awaiting_agent' where id=?", (local,))
+                    self.event(inc_id, "creao_agent_pending", "backend", {"run_ref": local, "task": task, "agent": "GRIDPILOT Remediation Agent"})
+                    return local
+                await self._start_cli_run(local, aid); return local
             res = await asyncio.to_thread(IX.creao_start_run, cfg["app_id"], {"request": jd(request)}, cfg["base"] + "/webhooks/creao/" + self.webhook_secret)
             rid = res.get("id")
             self.db.ex("update agent_runs set provider_run_id=?, status=? where id=?", (rid, res.get("status", "pending"), local))
@@ -257,6 +284,182 @@ class Engine:
             self.event(inc["id"], "creao_run_unsuccessful", "backend", {"run_ref": r["id"], "status": st}); return
         if r["task"] == "post_incident_summary":
             inc["summary"] = {"run_ref": r["id"], "text": data.get("result_text", "")[:6000]}; self.save_incident(inc)
+
+    # ------------------------------------------------------------------ dynamic CREAO agents (CREAO CLI, cr_sk_ key)
+    async def ensure_agent(self, kind, name, text):
+        key = kind + ":" + hashlib.sha256(text.encode()).hexdigest()[:12]
+        row = self.db.one("select * from specialists where key=?", (key,))
+        if row and row["status"] == "ready": return key, row["agent_id"]
+        if row and row["status"] == "creating": return key, None
+        res = await asyncio.to_thread(IX.cli_create_agent, text, (self.public_base + "/webhooks/creao/" + self.webhook_secret) if self.public_base else None)
+        self.db.ex("insert or replace into specialists values(?,?,?,?,?,?,?,?)", (key, kind, name, None, "creating", res.get("run_id"), now(),
+                   jd({"model": res.get("model"), "conversation_id": res.get("conversation_id"), "brief_chars": len(text)})))
+        self.event(None, "creao_agent_creation_started", "backend", {"key": key, "name": name, "creation_run_id": res.get("run_id")})
+        return key, None
+
+    async def _start_cli_run(self, local, agent_id):
+        req = self.pending_inputs.pop(local, None)
+        r = self.db.one("select * from agent_runs where id=?", (local,))
+        if req is None:
+            self.db.ex("update agent_runs set status='failed', completed=? where id=?", (now(), local))
+            self.event(r["incident_id"], "creao_run_failed_to_start", "backend", {"run_ref": local, "error": "request lost (backend restarted before the agent was ready)"}); return
+        try:
+            res = await asyncio.to_thread(IX.cli_start_run, agent_id, {"request": jd(req)},
+                                          (self.public_base + "/webhooks/creao/" + self.webhook_secret) if self.public_base else None)
+            d = json.loads(r["data"] or "{}"); d["agent_id"] = agent_id; d["conversation_id"] = res.get("conversation_id"); d["model"] = res.get("model")
+            self.db.ex("update agent_runs set provider_run_id=?, status=?, data=? where id=?", (res.get("run_id"), res.get("status", "pending"), jd(d), local))
+            self.event(r["incident_id"], "creao_run_started", "backend", {"run_ref": local, "creao_run_id": res.get("run_id"), "task": r["task"], "agent_id": agent_id})
+        except Exception as ex:
+            self.db.ex("update agent_runs set status='failed', completed=? where id=?", (now(), local))
+            self.event(r["incident_id"], "creao_run_failed_to_start", "backend", {"run_ref": local, "task": r["task"], "error": str(ex)[:400]})
+
+    async def special_case(self, inc_id, kind, extra, question):
+        """A failure path: create/run the matching specialist first; its findings feed the remediation replan."""
+        ref = await self.spawn_specialist(inc_id, kind, question, requested_by="backend", context=extra, auto=True, follow_up="replan")
+        if not ref:
+            await self.start_creao(inc_id, "replan_after_failure", extra)
+
+    async def spawn_specialist(self, inc_id, kind, question, mission=None, requested_by="backend", context=None, auto=False, follow_up=None):
+        cfg = self.creao_config()
+        if not cfg["cli"] or not cfg["base"]:
+            self.event(inc_id, "specialist_unavailable", "backend", {"kind": kind, "reason": "CREAO CLI key (cr_sk_) not saved" if not cfg["cli"] else "no public tool URL yet"}); return None
+        n = self.db.one("select count(*) n from agent_runs where incident_id=? and task like 'specialist:%'", (inc_id,))["n"]
+        if n >= SP.MAX_PER_INCIDENT:
+            self.event(inc_id, "specialist_refused", "backend", {"kind": kind, "reason": "limit of %d specialists per incident" % SP.MAX_PER_INCIDENT}); return None
+        try: spec = SP.spec_for(kind, mission)
+        except ValueError as ex:
+            self.event(inc_id, "specialist_refused", requested_by, {"kind": kind, "reason": str(ex)}); return None
+        inc = self.incident(inc_id); plan = self.current_plan(inc_id)
+        local = "SP-%s" % secrets.token_hex(4); token = secrets.token_urlsafe(24)
+        self.tokens[token] = {"incident_id": inc_id, "task": "specialist:" + spec["kind"], "run_ref": local, "expires": now() + 3600, "allowed": SP.READ_TOOLS}
+        request = {"gridpilot_api": cfg["base"] + "/tools/creao", "tool_token": token, "incident_id": inc_id, "question": str(question)[:2000],
+                   "specialist": spec["kind"], "context": context or {},
+                   "tool_protocol": "POST JSON to <gridpilot_api>/<tool_name> with header 'X-GridPilot-Tool-Token: <tool_token>'. GET <gridpilot_api>/manifest for schemas."}
+        data = {"specialist": spec, "question": request["question"], "requested_by": requested_by, "auto": auto, "follow_up": follow_up, "context": context or {},
+                "trigger_state": inc["state"], "plan_version_at_start": plan["version"] if plan else 0, "request": {**request, "tool_token": "[redacted]"}}
+        self.db.ex("insert into agent_runs values(?,?,?,?,?,?,?,?,?)", (local, "creao-cli", None, inc_id, "specialist:" + spec["kind"], "creating_agent", now(), None, jd(data)))
+        self.event(inc_id, "specialist_requested", requested_by, {"run_ref": local, "kind": spec["kind"], "name": spec["name"], "trigger": spec.get("trigger"), "question": request["question"][:300]})
+        self.pending_inputs[local] = request
+        try:
+            key, aid = await self.ensure_agent(spec["kind"], spec["name"], SP.creation_text(spec, SP.READ_TOOLS))
+        except Exception as ex:
+            self.pending_inputs.pop(local, None)
+            self.db.ex("update agent_runs set status='failed', completed=? where id=?", (now(), local))
+            self.event(inc_id, "specialist_failed", "backend", {"run_ref": local, "error": str(ex)[:400]}); return None
+        d = json.loads(self.db.one("select data from agent_runs where id=?", (local,))["data"]); d["agent_key"] = key
+        self.db.ex("update agent_runs set data=?, status=? where id=?", (jd(d), "awaiting_agent" if not aid else "starting", local))
+        if aid: await self._start_cli_run(local, aid)
+        self.notify(); return local
+
+    def specialist_summaries(self, inc_id):
+        out = []
+        for r in self.db.all("select * from agent_runs where incident_id=? and task like 'specialist:%' order by created", (inc_id,)):
+            d = json.loads(r["data"] or "{}"); s = d.get("structured") or {}
+            out.append({"run_ref": r["id"], "kind": r["task"].split(":", 1)[1], "status": r["status"], "finding": s.get("finding"), "root_cause": s.get("root_cause"),
+                        "avoid_racks": s.get("avoid_racks"), "recommended_actions": s.get("recommended_actions"), "confidence": s.get("confidence"),
+                        "backend_evaluation": d.get("evaluation")})
+        return out
+
+    async def cli_poller(self):
+        while True:
+            await asyncio.sleep(4)
+            try:
+                for a in self.db.all("select * from specialists where status='creating'"):
+                    try: run = await asyncio.to_thread(IX.cli_get_run, a["creation_run_id"])
+                    except Exception: continue
+                    st = run.get("status")
+                    if st == "completed":
+                        aid = run.get("agent_id") or (run.get("result") or {}).get("agent_id")
+                        self.db.ex("update specialists set status=?, agent_id=? where key=?", ("ready" if aid else "failed", aid, a["key"]))
+                        self.event(None, "creao_agent_created" if aid else "creao_agent_creation_failed", "creao-cli:" + a["creation_run_id"],
+                                   {"key": a["key"], "name": a["name"], "agent_id": aid, "agent_name": (run.get("result") or {}).get("agent_name")})
+                    elif st in ("failed", "cancelled"):
+                        self.db.ex("update specialists set status='failed' where key=?", (a["key"],))
+                        self.event(None, "creao_agent_creation_failed", "creao-cli:" + a["creation_run_id"], {"key": a["key"], "status": st, "error": run.get("error")})
+                for r in self.db.all("select * from agent_runs where provider='creao-cli' and status='awaiting_agent'"):
+                    d = json.loads(r["data"] or "{}"); a = self.db.one("select * from specialists where key=?", (d.get("agent_key"),))
+                    if a and a["status"] == "ready": await self._start_cli_run(r["id"], a["agent_id"])
+                    elif a and a["status"] == "failed":
+                        self.pending_inputs.pop(r["id"], None)
+                        self.db.ex("update agent_runs set status='failed', completed=? where id=?", (now(), r["id"]))
+                        self.event(r["incident_id"], "creao_run_failed_to_start", "backend", {"run_ref": r["id"], "error": "agent creation failed"})
+                        await self._follow_up(r, d)
+                for r in self.db.all("select * from agent_runs where provider='creao-cli' and status in ('pending','running','queued','starting') and provider_run_id is not null"):
+                    await self.refresh_cli(r)
+                for r in self.db.all("select * from agent_runs where provider='creao-cli' and task like 'specialist:%' and completed is null and created < ?", (now() - 420,)):
+                    d = json.loads(r["data"] or "{}")
+                    if d.get("follow_up") and not d.get("follow_up_done"):
+                        self.event(r["incident_id"], "specialist_timeout", "backend", {"run_ref": r["id"], "note": "continuing replan without specialist findings"})
+                        await self._follow_up(r, d)
+            except Exception:
+                traceback.print_exc()
+
+    async def refresh_cli(self, r):
+        try: run = await asyncio.to_thread(IX.cli_get_run, r["provider_run_id"])
+        except Exception: return
+        st = run.get("status")
+        if st == r["status"]: return
+        data = json.loads(r["data"] or "{}"); data["provider"] = {k: run.get(k) for k in ("status", "error", "model", "usage", "conversation_id") if k in run}
+        if st in ("completed", "failed", "cancelled"):
+            text = ((run.get("result") or {}).get("text") or "")
+            data["result_text"] = text[:20000]
+            if r["task"].startswith("specialist:"):
+                data["structured"], data["structured_errors"] = SP.parse_result(text)
+            else:
+                data["structured"], data["structured_errors"] = self.parse_structured(text)
+            self.db.ex("update agent_runs set status=?, completed=?, data=? where id=?", (st, now(), jd(data), r["id"]))
+            self.event(r["incident_id"], "creao_run_" + st, "creao:" + r["provider_run_id"], {"run_ref": r["id"], "task": r["task"], "structured_valid": not data["structured_errors"]})
+            if r["task"].startswith("specialist:"): await self.after_specialist(r, st, data)
+            else: await self.after_creao(r, st, data)
+        else:
+            self.db.ex("update agent_runs set status=?, data=? where id=?", (st, jd(data), r["id"])); self.notify()
+
+    async def after_specialist(self, r, st, data):
+        inc = self.incident(r["incident_id"]); obj = data.get("structured") or {}
+        acts = obj.get("recommended_actions") or []
+        if st == "completed" and acts and inc:
+            try:
+                ev = await self.evaluate(acts, inc["rack"], "specialist %s" % r["task"].split(":", 1)[1])
+                data["evaluation"] = {"actions": ev["actions"], "recover_s": ev["forecast"]["recover_s"], "final_gpu_c": ev["forecast"]["final_gpu_c"],
+                                      "incremental_cost_usd": ev["finance"]["incremental_cost_usd"], "policy_decision": ev["policy"]["decision"]}
+                self.event(inc["id"], "specialist_recommendation_evaluated", "backend", {"run_ref": r["id"], **{k: data["evaluation"][k] for k in ("recover_s", "final_gpu_c", "incremental_cost_usd", "policy_decision")}})
+            except Exception as ex:
+                data["evaluation_error"] = str(ex)[:400]
+        if obj.get("finding") and inc:
+            inc.setdefault("reports", []).append({"kind": "specialist:" + r["task"].split(":", 1)[1], "text": str(obj.get("finding"))[:4000], "by": "creao:" + (r["provider_run_id"] or r["id"]), "ts": now()})
+            self.save_incident(inc)
+        self.db.ex("update agent_runs set data=? where id=?", (jd(data), r["id"]))
+        self.event(r["incident_id"], "specialist_completed", "creao:" + (r["provider_run_id"] or r["id"]), {"run_ref": r["id"], "status": st, "has_recommendation": bool(data.get("evaluation"))})
+        await self._follow_up(r, data)
+
+    async def _follow_up(self, r, data):
+        if data.get("follow_up") != "replan" or data.get("follow_up_done"): return
+        data["follow_up_done"] = True; self.db.ex("update agent_runs set data=? where id=?", (jd(data), r["id"]))
+        inc = self.incident(r["incident_id"]); plan = self.current_plan(r["incident_id"])
+        if not inc or inc["state"] not in ("REPLAN", "TRIAGING", "DENIED") or (plan and plan["version"] != data.get("plan_version_at_start")): return
+        ref = await self.start_creao(inc["id"], "replan_after_failure", dict(data.get("context") or {}, specialist_findings=self.specialist_summaries(inc["id"])))
+        ev = data.get("evaluation")
+        if not ref and ev and ev.get("recover_s") is not None and ev.get("policy_decision") != "FORBIDDEN":
+            await self.adopt_specialist(r["id"], "backend")
+
+    async def adopt_specialist(self, run_ref, actor):
+        r = self.db.one("select * from agent_runs where id=?", (run_ref,))
+        if not r or not r["task"].startswith("specialist:"): raise ValueError("unknown specialist run")
+        d = json.loads(r["data"] or "{}"); ev = d.get("evaluation"); s = d.get("structured") or {}
+        if not ev: raise ValueError("this specialist returned no evaluated recommendation")
+        meta = {"diagnosis": s.get("root_cause") or s.get("finding"), "evidence": s.get("evidence"), "candidate_actions": [ev["actions"]],
+                "expected_thermal_outcomes": s.get("expected_outcome"), "expected_sla_risks": s.get("risks"), "confidence": s.get("confidence"),
+                "reasoning_summary": "Recommendation from CREAO specialist %s (%s), re-evaluated deterministically by the backend." % (r["task"].split(":", 1)[1], r["provider_run_id"]),
+                "origin": "creao-specialist", "adopted_by": actor}
+        return await self.propose_plan(r["incident_id"], ev["actions"], "creao-specialist:%s:%s" % (r["task"].split(":", 1)[1], (r["provider_run_id"] or "")[:8]), meta)
+
+    async def prepare_agents(self):
+        out = {}
+        for k, spec in [("remediation", None)] + list(SP.CATALOG.items()):
+            if k == "remediation": key, aid = await self.ensure_agent("remediation", "GRIDPILOT Remediation Agent", SP_REMEDIATION_TEXT())
+            else: key, aid = await self.ensure_agent(k, spec["name"], SP.creation_text(dict(spec, kind=k), SP.READ_TOOLS))
+            out[k] = {"key": key, "agent_id": aid, "status": "ready" if aid else "creating"}
+        return out
 
     # ------------------------------------------------------------------ forecasting (deterministic)
     def apply_actions(self, cfg, actions):
@@ -401,7 +604,7 @@ class Engine:
 
     async def after_approval(self, inc_id, pid, ver):
         cfg = self.creao_config()
-        if cfg["app_id"] and cfg["base"]:
+        if (cfg["app_id"] or cfg["cli"]) and cfg["base"]:
             await self.start_creao(inc_id, "execute_approved_plan", {"approved_plan": {"plan_id": pid, "plan_version": ver},
                                     "instruction": "Verify the incident is unchanged, then call request_execution for exactly this plan version, then monitor via get_incident_context and submit_report."})
         else:
@@ -479,7 +682,8 @@ class Engine:
                 self._step(ex_id, "validation_failed", False, "; ".join(c["name"] + ": " + c["detail"] for c in bad))
                 self._exec_update(ex_id, "validation_failed")
                 inc = self.incident(inc_id); self.transition(inc, "REPLAN", "backend", "validation failed before application", {"failed_checks": bad})
-                self.spawn(self.start_creao(inc_id, "replan_after_failure", {"failure": {"stage": "validation", "checks": bad}}))
+                self.spawn(self.special_case(inc_id, "capacity_planner", {"failure": {"stage": "validation", "checks": bad}},
+                                             "The candidate configuration failed validation: %s. Find feasible placements and a corrected action set." % "; ".join(c["name"] for c in bad)))
                 return
             sha = CS.commit_candidate(wt, branch, "%s: apply %s v%d for %s" % (ex_id, plan["id"], plan["version"], inc_id))
             self._step(ex_id, "committed", True, "main -> %s" % sha[:10])
@@ -605,7 +809,8 @@ class Engine:
             self.db.ex("update plans set status='rolled_back' where id=? and version=?", (er["plan_id"], er["plan_version"]))
             inc = self.incident(inc_id); inc["monitor"] = None; self.save_incident(inc)
             self.transition(inc, "REPLAN", "backend", "rollback verified; requesting revised plan", {"rollback_sha": sha})
-            self.spawn(self.start_creao(inc_id, "replan_after_failure", {"failure": {"stage": "post_apply", "reason": reason, "rolled_back_to": ex["snapshot_sha"][:10]}}))
+            self.spawn(self.special_case(inc_id, "thermal_forensics", {"failure": {"stage": "post_apply", "reason": reason, "rolled_back_to": ex["snapshot_sha"][:10], "targets": (ex.get("changed_paths") or [])}},
+                                         "The applied plan failed after application and was rolled back (%s). Why did it fail, which racks must be avoided, and what corrected action set recovers the incident rack?" % reason))
         except Exception as e:
             traceback.print_exc()
             inc = self.incident(inc_id); self.transition(inc, "ESCALATED", "backend", "rollback error: %s" % str(e)[:200])
@@ -639,6 +844,9 @@ class Engine:
         self.save_incident(inc)
         self.event(inc_id, "invoice_reconciled", "finance-engine", {"invoice_id": inv_id, **rec})
         self.transition(inc, "CLOSED", "backend", "incident closed; invoice %s %s" % (inv_id, rec["status"]))
+        if rec.get("status") != "RECONCILED":
+            self.spawn(self.spawn_specialist(inc_id, "finops_auditor", "Invoice %s did not reconcile (%s). Attribute the variance and state what to dispute." % (inv_id, rec.get("status")),
+                                             requested_by="backend", context={"invoice_id": inv_id}, auto=True))
         await self.start_creao(inc_id, "post_incident_summary", {"invoice_id": inv_id})
 
     # ------------------------------------------------------------------ voice (Cartesia)
@@ -667,3 +875,8 @@ class Engine:
     def status(self):
         inc = self.open_incident() or (lambda r: self.incident(r["id"]) if r else None)(self.db.one("select id from incidents order by created desc limit 1"))
         return inc
+
+
+def SP_REMEDIATION_TEXT():
+    brief = open("/workspace/gridpilot/docs/CREAO_AGENT.md").read()
+    return brief

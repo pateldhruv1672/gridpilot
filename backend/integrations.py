@@ -51,3 +51,31 @@ CART = {m: _Proxy("gp_cartesia_" + m.lower(), "https://api.cartesia.ai", m, dict
 
 def cartesia(method, path, body=None, timeout=30):
     return CART[method].call(path, body, timeout)
+
+# ---- CREAO CLI (account API, cr_sk_ key): create personal agents on the fly and run them. Docs: docs.creao.ai/developer-api
+_cli_h = {"authorization": "Bearer ${secrets.CREAO_CLI_KEY}", "content-type": "application/json"}
+CLI_POST = _Proxy("gp_creao_cli_post", "https://developer.creao.ai/v1", "POST", _cli_h)
+CLI_GET = _Proxy("gp_creao_cli_get", "https://developer.creao.ai/v1", "GET", {"authorization": "Bearer ${secrets.CREAO_CLI_KEY}"})
+
+def cli_available():
+    try: CLI_GET.get(); return True
+    except ProviderError: return False
+
+def cli_create_agent(description, webhook_url=None, model=None):
+    body = {"input": description}
+    if webhook_url: body["webhook_url"] = webhook_url
+    if model: body["model"] = model
+    return CLI_POST.call("/agents", body, timeout=60)        # {run_id, status, agent_id: null, conversation_id, model}
+
+def cli_start_run(agent_id, inp, webhook_url=None, conversation_id=None, model=None):
+    body = {"agent_id": agent_id, "input": inp}
+    if webhook_url: body["webhook_url"] = webhook_url
+    if conversation_id: body["conversation_id"] = conversation_id
+    if model: body["model"] = model
+    return CLI_POST.call("/runs", body, timeout=60)          # {run_id, status, agent_id, conversation_id, model}
+
+def cli_get_run(run_id):
+    return CLI_GET.call("/runs/%s" % run_id)                # {run_id, status, agent_id, result{text, agent_id?}, usage}
+
+def cli_list_agents():
+    return CLI_GET.call("/agents")

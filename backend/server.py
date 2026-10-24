@@ -84,6 +84,8 @@ def integrations_status():
             "cartesia": {"agent_id": ENG.db.get("cartesia_agent_id"), "from_number_id": ENG.db.get("cartesia_from_number_id"), "verified": ENG.db.get("cartesia_verified"),
                          "proxy_error": IX.CART["GET"].error, "operator": {"name": op.get("name"), "phone_masked": ("•••" + op["phone"][-4:]) if op.get("phone") else None, "consent": op.get("consent")},
                          "auto_call": ENG.db.get("auto_call", True)},
+            "creao_cli": {"available": ENG._cli_ok, "verified": ENG.db.get("creao_cli_verified"), "proxy_error": IX.CLI_GET.error,
+                          "agents": [{k: a[k] for k in ("key", "kind", "name", "agent_id", "status", "created")} for a in ENG.db.all("select * from specialists order by created")]},
             "public_base_ready": bool(ENG.public_base)}
 
 def full_state():
@@ -92,7 +94,18 @@ def full_state():
     incs = [{"id": r["id"], "state": r["state"], "rack": r["rack"], "created": r["created"]} for r in ENG.db.all("select id,state,rack,created from incidents order by created desc limit 20")]
     return {"incident": incident_detail(inc), "incidents": incs, "events": evs, "finance": finance_summary(), "integrations": integrations_status(),
             "series": list(ENG.series), "config_log": CS.log(15), "thresholds": S.THRESH, "speed": ENG.speed, "paused": ENG.paused,
-            "fail_armed": ENG.fail_armed, "sim_t": round(SIM.t, 1), "evidence": EVIDENCE}
+            "fail_armed": ENG.fail_armed, "sim_t": round(SIM.t, 1), "evidence": EVIDENCE, "specialists": specialist_runs()}
+
+def specialist_runs():
+    out = []
+    for r in ENG.db.all("select * from agent_runs where task like 'specialist:%' order by created desc limit 20"):
+        d = json.loads(r["data"] or "{}"); sp = d.get("specialist") or {}; st = d.get("structured") or {}
+        out.append({"run_ref": r["id"], "incident_id": r["incident_id"], "kind": r["task"].split(":", 1)[1], "name": sp.get("name"), "mission": sp.get("mission"),
+                    "trigger": sp.get("trigger"), "requested_by": d.get("requested_by"), "status": r["status"], "creao_run_id": r["provider_run_id"], "agent_id": d.get("agent_id"),
+                    "question": d.get("question"), "finding": st.get("finding"), "root_cause": st.get("root_cause"), "avoid_racks": st.get("avoid_racks"),
+                    "confidence": st.get("confidence"), "evaluation": d.get("evaluation"), "created": r["created"], "completed": r["completed"],
+                    "result_excerpt": (d.get("result_text") or "")[:1500]})
+    return out
 
 EVIDENCE = {"simulated": ["GPU hardware (64 racks, 512 GPUs)", "Airflow/thermal physics (approximate 2D advection-diffusion, not CFD)", "Customers, workloads, invoices, rate cards"],
             "real": ["Backend policy enforcement (deterministic code)", "CREAO agent runs (run IDs from agent.creao.ai)", "Cartesia outbound calls (agent_call_id)",
@@ -298,7 +311,40 @@ async def api_test(req):
             info = await asyncio.to_thread(V.ensure_setup, ENG); out["cartesia"]["setup"] = info
     except Exception as e:
         ENG.db.set("cartesia_verified", {"ok": False, "at": time.time(), "error": str(e)[:300]}); out["cartesia"] = {"ok": False, "detail": str(e)[:300]}
+    try:
+        ENG._cli_checked = 0
+        if not ENG.creao_config()["cli"]: raise IX.ProviderError("CREAO CLI key (CREAO_CLI_KEY, cr_sk_) not saved")
+        r = await asyncio.to_thread(IX.cli_list_agents)
+        ENG.db.set("creao_cli_verified", {"ok": True, "at": time.time()}); out["creao_cli"] = {"ok": True, "detail": "authenticated; agent creation available"}
+    except Exception as e:
+        ENG.db.set("creao_cli_verified", {"ok": False, "at": time.time(), "error": str(e)[:300]}); out["creao_cli"] = {"ok": False, "detail": str(e)[:300]}
     DIRTY["v"] = True; return jresp(out)
+
+@routes.post("/api/incidents/{id}/specialist")
+async def api_specialist(req):
+    uid = owner_only(req); b = await req.json(); iid = req.match_info["id"]
+    q = (b.get("question") or "").strip()
+    if not q: return jresp({"ok": False, "message": "question required"}, 400)
+    ref = await ENG.spawn_specialist(iid, (b.get("kind") or "custom")[:40], q, b.get("mission"), requested_by="operator:" + uid[:8])
+    DIRTY["v"] = True
+    return jresp({"ok": bool(ref), "run_ref": ref, "message": None if ref else "not started; see the incident timeline for the reason"})
+
+@routes.post("/api/specialists/{ref}/adopt")
+async def api_adopt(req):
+    uid = owner_only(req)
+    try: res = await ENG.adopt_specialist(req.match_info["ref"], "operator:" + uid[:8])
+    except ValueError as e: return jresp({"ok": False, "message": str(e)}, 400)
+    DIRTY["v"] = True
+    return jresp({"ok": True, "plan_id": res["plan_id"], "plan_version": res["plan_version"], "policy_decision": res["policy_decision"]})
+
+@routes.post("/api/specialists/prepare")
+async def api_prepare(req):
+    owner_only(req)
+    ENG._cli_checked = 0
+    if not ENG.creao_config()["cli"]: return jresp({"ok": False, "message": "save the CREAO CLI key (cr_sk_) first"}, 400)
+    try: out = await ENG.prepare_agents()
+    except Exception as e: return jresp({"ok": False, "message": str(e)[:300]}, 502)
+    DIRTY["v"] = True; return jresp({"ok": True, "agents": out})
 
 @routes.get("/api/finance/summary")
 async def api_fin(req): owner_only(req); return jresp(finance_summary())
@@ -329,6 +375,7 @@ MANIFEST = {
         "request_execution": "{plan_id, plan_version} -> backend checks policy + verified approval, then executes via the config store. You cannot approve.",
         "get_cost_comparison": "{} -> all evaluated options for this incident with cost, SLA risk, recovery time",
         "get_reconciliation": "{} -> invoice, metered usage, transfer records and deterministic reconciliation for this incident",
+        "request_specialist": "{kind: thermal_forensics|capacity_planner|finops_auditor|sla_guardian|<new name>, question, mission (required for a new kind)} -> GRIDPILOT creates that CREAO specialist agent on the fly and runs it (read/evaluate tools only). Results appear in get_incident_context.specialists. Remediation agent only.",
         "submit_report": "{kind: diagnosis|alternative_assessment|execution_note|post_incident_summary|reconciliation_explanation, text} -> stored on the incident"}}
 
 def remember_option(iid, ev, label):
@@ -358,6 +405,7 @@ async def tool_dispatch(tool, args, iid, actor, channel):
                 "cooling_units": snap["cooling"], "thresholds": S.THRESH, "policy_rules": {"auto": "fan 60-130%, power reduction <=10%", "approval": "migration, >10% power cut, cost >$100, protected SLA", "forbidden": "delete, shutdown, firmware, billing"},
                 "current_plan": plan_view(plan) and {k: v for k, v in plan_view(plan).items() if k not in ("forecast", "baseline")} | {"recover_s": plan["evaluation"]["forecast"]["recover_s"], "final_gpu_c": plan["evaluation"]["forecast"]["final_gpu_c"]},
                 "approval": {"status": apr["status"], "plan_id": apr["plan_id"], "plan_version": apr["plan_version"]} if apr else None,
+                "specialists": ENG.specialist_summaries(iid),
                 "sla_now": {w: v for w, v in snap["latency"].items() if v["breach"] or snap["racks"][16]["rack_id"] == "R17" and w in rack_brief(snap, inc["rack"])["workloads"]}}
     if tool == "get_telemetry":
         racks = [r for r in (args.get("racks") or [inc["rack"]]) if r in HIST][:12]
@@ -391,6 +439,11 @@ async def tool_dispatch(tool, args, iid, actor, channel):
         return {"options": OPTIONS.get(iid, []), "current_plan": plan and {"plan_id": plan["id"], "version": plan["version"], "finance": plan["evaluation"]["finance"]}, "assumptions": FIN.ASSUMPTIONS}
     if tool == "get_reconciliation":
         r = ENG.db.one("select * from invoices where incident_id=?", (iid,)); return json.loads(r["data"]) if r else {"status": "no invoice yet"}
+    if tool == "request_specialist":
+        ref = await ENG.spawn_specialist(iid, str(args.get("kind") or "custom")[:40], args.get("question") or "", args.get("mission"), requested_by=actor)
+        r = ref and ENG.db.one("select status from agent_runs where id=?", (ref,))
+        return {"ok": bool(ref), "run_ref": ref, "status": r and r["status"],
+                "note": "GRIDPILOT is creating/running this CREAO specialist. Its finding and a backend-evaluated recommendation will appear in get_incident_context.specialists." if ref else "specialist not started; see incident events (CREAO CLI key missing, limit reached, or mission too short)"}
     if tool == "submit_report":
         inc.setdefault("reports", []).append({"kind": args.get("kind"), "text": str(args.get("text", ""))[:8000], "by": actor, "ts": time.time()})
         if args.get("kind") == "post_incident_summary": inc["summary"] = {"by": actor, "text": str(args.get("text", ""))[:8000]}
@@ -405,6 +458,9 @@ async def creao_tool(req):
     tok = ENG.tokens.get(req.headers.get("X-GridPilot-Tool-Token", ""))
     if not tok or tok["expires"] < time.time(): return jresp({"error": "invalid or expired tool token"}, 401)
     tool = req.match_info["tool"]
+    if tok.get("allowed") and tool not in tok["allowed"] and tool != "manifest":
+        ENG.event(tok["incident_id"], "agent_tool_refused", "creao:" + tok["run_ref"], {"tool": tool, "reason": "not in this agent's tool scope"})
+        return jresp({"error": "tool %s is not in this agent's scope" % tool}, 403)
     try: args = await req.json()
     except Exception: args = {}
     run = ENG.db.one("select provider_run_id from agent_runs where id=?", (tok["run_ref"],))
@@ -423,9 +479,9 @@ async def creao_webhook(req):
     if req.match_info["secret"] != ENG.webhook_secret: return web.Response(status=404)
     try: b = await req.json()
     except Exception: b = {}
-    rid = b.get("runId")
+    rid = b.get("runId") or b.get("run_id")
     r = ENG.db.one("select * from agent_runs where provider_run_id=?", (rid,)) if rid else None
-    if r: asyncio.get_event_loop().create_task(ENG.refresh_creao(r))   # never trust the body: re-fetch from CREAO API
+    if r: asyncio.get_event_loop().create_task(ENG.refresh_creao(r) if r["provider"] == "creao" else ENG.refresh_cli(r))   # never trust the body: re-fetch from CREAO API
     return jresp({"ok": True})
 
 # ---------------------------------------------------------------- voice tools
@@ -514,7 +570,7 @@ async def voice_tool(req):
 
 async def on_start(app):
     loop = asyncio.get_event_loop()
-    for c in (sim_loop(), ENG.creao_poller(), V.poller(ENG), ingress_refresher()):
+    for c in (sim_loop(), ENG.creao_poller(), ENG.cli_poller(), V.poller(ENG), ingress_refresher()):
         t = loop.create_task(c); ENG.bg.add(t)
 
 def main():
