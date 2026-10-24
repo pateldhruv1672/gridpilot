@@ -262,13 +262,14 @@ function DataCenterScene({ snapRef, opts, selected, onSelect, camCmd }) {
       // labels
       if (snap && labelEls.length) {
         const sel = selRef.current;
+        const hotSet = new Set(snap.racks.map((r, k) => [r.status === 'critical' ? 1000 + r.gpu_temp_c : r.status === 'elevated' ? r.gpu_temp_c : -1, k]).filter(x => x[0] > 0).sort((a, b) => b[0] - a[0]).slice(0, 4).map(x => x[1]));
         for (let i = 0; i < 64; i++) {
-          const rk = snap.racks[i]; const d = labelEls[i]; const showIt = o.labels || i === sel || rk.status !== 'normal';
+          const rk = snap.racks[i]; const d = labelEls[i]; const showIt = o.labels || i === sel || hotSet.has(i);
           if (!showIt) { d.style.display = 'none'; continue; }
           const [x, z] = rackPos(i); const [sx, sy, vis] = project(x, 2.25, z);
           if (!vis) { d.style.display = 'none'; continue; }
           d.style.display = 'block'; d.style.transform = 'translate(' + sx + 'px,' + sy + 'px) translate(-50%,-100%)';
-          const strong = i === sel || rk.status !== 'normal';
+          const strong = i === sel || hotSet.has(i);
           d.style.color = rk.status === 'critical' ? C.red : rk.status === 'elevated' ? C.amber : (i === sel ? C.cyan : '#7f93ab');
           d.style.padding = strong ? '2px 6px' : '0'; d.style.borderRadius = '4px'; d.style.background = strong ? 'rgba(7,11,19,.78)' : 'transparent'; d.style.border = strong ? '1px solid ' + (rk.status === 'critical' ? 'rgba(255,89,110,.5)' : rk.status === 'elevated' ? 'rgba(255,187,85,.45)' : 'rgba(67,217,245,.45)') : 'none';
           d.textContent = strong ? rk.rack_id + '  ' + rk.gpu_temp_c.toFixed(1) + '°C' : rk.rack_id;

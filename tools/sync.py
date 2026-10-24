@@ -26,7 +26,11 @@ def sync(message=None):
     if sh("status", "--porcelain"):
         sh("commit", "-q", "-m", message or ("sync: " + time.strftime("%Y-%m-%d %H:%M:%S %Z")))
     from mana_oauth import Connection
+    import requests
     tok = Connection("github").bind()
+    chk = requests.get("https://api.github.com/repos/pateldhruv1672/gridpilot", headers={"Authorization": "Bearer " + tok, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10"}, timeout=20)
+    if chk.status_code != 200 or not chk.json().get("permissions", {}).get("push"):
+        print("waiting: github.com/pateldhruv1672/gridpilot not reachable with push access (HTTP %s); local commits kept" % chk.status_code); return
     hdr = "AUTHORIZATION: basic " + base64.b64encode(("x-access-token:" + tok).encode()).decode()
     ahead = sh("rev-list", "--count", "origin/main..main", check=False) if sh("ls-remote", "--heads", REMOTE, "main", extra=["-c", "http.extraheader=" + hdr], check=False) else "init"
     if ahead == "0":
