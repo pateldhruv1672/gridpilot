@@ -13,6 +13,9 @@ def sh(*a, check=True, extra=None):
     return r.stdout.strip()
 
 def pull_frontend():
+    # never overwrite local, uncommitted edits: commit them instead and let the deploy step push them to Firebase
+    if subprocess.run(["git", "diff", "--quiet", "--", "frontend/GridpilotApp.jsx"], cwd=REPO).returncode != 0:
+        return
     from firebase_helper import firebase
     code = firebase.read(UID + "/file-system/apps/gridpilot/app/code")
     if code:

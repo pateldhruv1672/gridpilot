@@ -448,7 +448,7 @@ function IncidentPanel({ g, setModal, toast }) {
         {[['Forecast recovery', plan.forecast.recover_s != null ? '≈' + plan.forecast.recover_s + 's' : 'not within 10 min', plan.forecast.recover_s != null ? C.mint : C.red],
           ['End GPU (fcst)', plan.forecast.final_gpu_c + '°C', C.text], ['Incremental cost', fmt$(plan.finance.incremental_cost_usd), C.text],
           ['SLA exposure', fmt$(plan.finance.sla_exposure_usd) + ' vs ' + fmt$(plan.baseline.sla_exposure_usd) + ' idle', C.text], ['Operational risk', plan.operational_risk, plan.operational_risk === 'low' ? C.mint : C.amber],
-          ['Policy', plan.policy.decision.replace('_', ' '), plan.policy.decision === 'AUTO_ALLOWED' ? C.mint : plan.policy.decision === 'FORBIDDEN' ? C.red : C.amber]].map(([k, v, c]) =>
+          ['Policy', plan.policy.decision.replace('_', ' '), plan.policy.decision === 'AUTO_ALLOWED' ? C.mint : plan.policy.decision === 'FORBIDDEN' ? C.red : C.amber]].concat(st.desk && st.desk.budgets['5200'] ? [['Burst budget after', fmt$(st.desk.budgets['5200'].budget - st.desk.budgets['5200'].actual - plan.finance.incremental_cost_usd) + ' of ' + fmt$(st.desk.budgets['5200'].budget), (st.desk.budgets['5200'].budget - st.desk.budgets['5200'].actual - plan.finance.incremental_cost_usd) < 0 ? C.red : C.text]] : []).map(([k, v, c]) =>
           <div key={k} className="px-2.5 py-2 rounded" style={{ background: C.p2, border: '1px solid ' + C.line }}><Label>{k}</Label><div style={{ font: '500 12px ' + MONO, color: c, marginTop: 3 }}>{v}</div></div>)}
       </div>
       <div className="mt-2" style={{ font: '10.5px/1.5 ' + SANS, color: C.mute }}>{plan.policy.plan_rules.concat(plan.policy.actions).filter(r => r.decision !== 'AUTO_ALLOWED').map(r => r.rule).join(' · ')}</div>
@@ -584,44 +584,110 @@ function ControlRoom({ g, setModal, toast }) {
   </div>;
 }
 
-function FinOps({ g }) {
-  const st = g.state; const s = (st && st.series) || []; const fin = st && st.finance; const inc = st && st.incident;
-  const [selInv, setSelInv] = React.useState(null);
-  const spend = React.useMemo(() => lineOpt([{ name: 'Electricity $ (actual)', data: s.map(p => [p.t, p.electricity_usd]), color: C.cyan, area: true }, { name: 'Remediation $ (actual)', data: s.map(p => [p.t, p.transfer_usd + p.lease_usd]), color: C.amber, area: true }]), [st]);
-  const perGpu = React.useMemo(() => lineOpt([{ name: '$/GPU-hr (energy)', data: s.map(p => [p.t, +(p.facility_kw * (fin ? fin.electricity_rate : 0.118) / Math.max(1, 512 * p.util)).toFixed(4)]), color: C.mint }]), [st]);
-  const energy = React.useMemo(() => lineOpt([{ name: 'Facility kW', data: s.map(p => [p.t, p.facility_kw]), color: '#7aa2ff', area: true }, { name: 'SLA breaches', data: s.map(p => [p.t, p.breaches]), color: C.red }]), [st]);
-  const budget = React.useMemo(() => fin && ({ animation: false, grid: { left: 70, right: 16, top: 10, bottom: 18 }, xAxis: { type: 'value', ...axisStyle }, yAxis: { type: 'category', data: ['Budget (Oct)', 'MTD actual*'], ...axisStyle },
-    series: [{ type: 'bar', data: [{ value: fin.monthly_budget_usd, itemStyle: { color: '#24405e' } }, { value: fin.mtd_actual_usd, itemStyle: { color: C.cyan } }], barWidth: 14, label: { show: true, position: 'right', color: C.text, fontFamily: MONO, fontSize: 10, formatter: (p) => '$' + Math.round(p.value).toLocaleString() } }] }), [st]);
-  const opts = (inc && inc.options) || [];
-  const invs = (fin && fin.invoices) || [];
-  const sel = invs.find(i => i.id === selInv);
-  return <div className="flex-1 overflow-auto p-4 flex flex-col gap-3" style={{ background: C.bg }}>
-    <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(300px,1fr))' }}>
-      <Panel style={{ padding: 10 }}><Label>Spend over simulated time</Label><EChart option={spend} height={170} /></Panel>
-      <Panel style={{ padding: 10 }}><Label>Energy cost per GPU-hour</Label><EChart option={perGpu} height={170} /></Panel>
-      <Panel style={{ padding: 10 }}><Label>Energy consumption · SLA breaches</Label><EChart option={energy} height={170} /></Panel>
-      <Panel style={{ padding: 10 }}><Label>Budget vs actual</Label>{budget && <EChart option={budget} height={120} />}<div style={{ font: '10px/1.5 ' + MONO, color: C.dim }}>*MTD actual = synthetic baseline {fin && fmt$(fin.mtd_baseline_usd_assumption)} (assumption) + simulated actuals {fin && fmt$(fin.cost_accum.electricity_usd + fin.cost_accum.lease_usd + fin.cost_accum.transfer_usd)}</div></Panel>
+const ST_COLOR = { awaiting_controller: '#FFBB55', held: '#FF596E', dispute_drafted: '#FF596E', disputed: '#FF596E', partially_disputed: '#FFBB55', approved: '#4FE0A5', paid: '#4FE0A5', received: '#8A9BB0', disputed_resolved: '#56677C' };
+function FinanceDesk({ g, toast }) {
+  const st = g.state; const D = st && st.desk; const inc = st && st.incident;
+  const [sub, setSub] = React.useState('inbox'); const [sel, setSel] = React.useState(null); const [note, setNote] = React.useState(''); const [busy, setBusy] = React.useState(false);
+  const [groupBy, setGroupBy] = React.useState('service');
+  if (!D) return <div className="flex-1 p-6" style={{ background: C.bg, color: C.mute, font: '12px ' + SANS }}>Loading finance desk…</div>;
+  const act = async (path, body, okMsg) => { setBusy(true); try { const r = await g.api(path, 'POST', body || {}); toast(r.message || okMsg, r.ok === false ? 'err' : 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(false); };
+  const pending = D.invoices.filter(i => !['paid', 'disputed_resolved'].includes(i.status));
+  const approved = D.invoices.filter(i => ['approved', 'partially_disputed'].includes(i.status));
+  const inv = D.invoices.find(i => i.id === sel) || pending[0];
+  const agentRecs = (i) => i.decisions.filter(d => d.kind === 'agent_recommendation');
+  const drafts = (i) => i.decisions.filter(d => d.kind === 'dispute_draft');
+  const apRun = (st.specialists || []).find(s => s.kind === 'ap_analyst');
+  const tabs = [['inbox', 'Invoice inbox', pending.length], ['explorer', 'Cost explorer'], ['incidents', 'Incident costs'], ['ledger', 'Ledger'], ['proof', 'Controls & proof']];
+  const chip = (txt, color) => <span style={{ font: '600 9.5px ' + MONO, color, border: '1px solid ' + color + '66', borderRadius: 4, padding: '1px 6px', whiteSpace: 'nowrap' }}>{txt}</span>;
+  const dec = (d) => ({ approve: C.mint, short_pay: C.amber, dispute: C.red, hold: C.red }[d] || C.mute);
+  // explorer data
+  const rows = D.explorer; const months = [...new Set(rows.map(r => r.month))].sort();
+  const keys = [...new Set(rows.map(r => r[groupBy]))];
+  const palette = [C.cyan, C.amber, C.mint, '#b49cff', C.red, '#7aa2ff', '#f0a6ca', '#9fd8ec'];
+  const explorerOpt = { animation: false, grid: { left: 64, right: 12, top: 30, bottom: 22 }, tooltip: { trigger: 'axis', backgroundColor: '#0d1522', borderColor: '#24334a', textStyle: { color: '#E6EEF7', fontFamily: MONO, fontSize: 10 }, valueFormatter: v => fmt$(v) },
+    legend: { top: 0, textStyle: { color: '#8A9BB0', fontFamily: MONO, fontSize: 9 }, itemWidth: 10, itemHeight: 6 }, xAxis: { type: 'category', data: months, ...axisStyle }, yAxis: { type: 'log', logBase: 10, min: 10, ...axisStyle, axisLabel: { ...axisStyle.axisLabel, formatter: v => '$' + (v >= 1000 ? Math.round(v / 1000) + 'k' : v) } },
+    series: keys.map((k, i) => ({ name: k, type: 'bar', stack: 'a', barWidth: 26, itemStyle: { color: palette[i % palette.length] }, data: months.map(m => +rows.filter(r => r.month === m && r[groupBy] === k).reduce((a, r) => a + r.usd, 0).toFixed(2) || null) })) };
+  const month = months[months.length - 1];
+  const totals = keys.map(k => [k, rows.filter(r => r[groupBy] === k && r.month === month).reduce((a, r) => a + r.usd, 0), rows.filter(r => r[groupBy] === k).reduce((a, r) => a + r.usd, 0)]).sort((a, b) => b[2] - a[2]);
+  // incident costs
+  const incIds = [...new Set(rows.map(r => r.incident).concat(D.invoices.map(i => i.incident)).filter(x => x && x !== '-'))].sort();
+  const incRows = incIds.map(id => { const invs = D.invoices.filter(i => i.incident === id); const acc = D.journal.filter(j => (j.source || '').startsWith('ACCRUAL-' + id)).reduce((a, j) => a + j.lines.filter(l => l.acct !== '2100').reduce((x, l) => x + (l.dr || 0), 0), 0);
+    return { id, accrued: acc, booked: rows.filter(r => r.incident === id).reduce((a, r) => a + r.usd, 0), invoiced: invs.reduce((a, i) => a + i.amount, 0), paid: invs.filter(i => i.status === 'paid').reduce((a, i) => a + i.amount, 0), disputed: invs.filter(i => /disput|held/.test(i.status)).length, invs }; });
+  const plan = inc && inc.plans && inc.plans.slice(-1)[0]; const b52 = D.budgets['5200'];
+  return <div className="flex-1 min-h-0 flex flex-col" style={{ background: C.bg }}>
+    <div className="flex items-center gap-1 px-4 pt-3 pb-2 flex-wrap" style={{ borderBottom: '1px solid ' + C.line }}>
+      <div className="mr-3"><Label color={C.cyan}>Atlas Compute · finance desk</Label><div style={{ font: '500 12px ' + SANS, color: C.text, marginTop: 2 }}>Seats: AP analyst + cost controller (autonomous), signing off with the human controller</div></div>
+      {tabs.map(([k, l, n]) => <button key={k} onClick={() => setSub(k)} className="rounded-full" style={{ font: '600 11px ' + SANS, padding: '5px 12px', color: sub === k ? '#04121a' : C.mute, background: sub === k ? C.cyan : 'transparent', border: '1px solid ' + (sub === k ? C.cyan : C.line) }}>{l}{n != null ? ' · ' + n : ''}</button>)}
+      <div className="ml-auto flex gap-2 items-center">
+        <span style={{ font: '10.5px ' + MONO, color: C.mute }}>score {D.score.correct}/{D.score.total} · planted errors caught {D.score.caught}/{D.score.planted_errors}</span>
+        <Btn small disabled={busy} onClick={() => act('/api/finance/ap-review', {}, 'AP review started')}>Run AP review (CREAO)</Btn>
+        <Btn small tone="mint" disabled={busy || !approved.length} onClick={() => act('/api/finance/payment-run', {}, 'Payment run complete')}>Payment run · {approved.length}</Btn>
+      </div>
     </div>
-    <Panel style={{ padding: 12 }}>
-      <div className="flex justify-between items-baseline"><Label color={C.cyan}>Incident economics {inc ? '· ' + inc.id : ''}</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>Forecasts are deterministic code; exposure is conditional, never booked</span></div>
-      {opts.length ? <table className="w-full mt-2" style={{ font: '11px ' + MONO, color: C.text, borderCollapse: 'collapse' }}><thead><tr style={{ color: C.dim, textAlign: 'left' }}>{['Option', 'Actions', 'Recovery', 'End GPU', 'Incremental $', 'SLA exposure', 'Net benefit*', 'Risk', 'Policy'].map(h => <th key={h} style={{ padding: '6px 6px', borderBottom: '1px solid ' + C.line, fontWeight: 500 }}>{h}</th>)}</tr></thead>
-        <tbody>{opts.map((o, i) => <tr key={i} style={{ borderBottom: '1px solid ' + C.line }}><td style={{ padding: 6, color: C.cyan }}>{o.label}</td><td style={{ padding: 6, color: C.mute, maxWidth: 260 }}>{o.actions.map(actionText).join('; ') || 'do nothing'}</td><td style={{ padding: 6, color: o.recover_s != null ? C.mint : C.red }}>{o.recover_s != null ? o.recover_s + 's' : '> 10 min'}</td><td style={{ padding: 6 }}>{o.final_gpu_c}°C</td><td style={{ padding: 6 }}>{fmt$(o.incremental_cost_usd)}</td><td style={{ padding: 6 }}>{fmt$(o.sla_exposure_usd)}</td><td style={{ padding: 6 }}>{fmt$(o.net_expected_benefit_usd)}</td><td style={{ padding: 6 }}>{o.operational_risk}</td><td style={{ padding: 6, color: o.policy === 'AUTO_ALLOWED' ? C.mint : C.amber }}>{o.policy}</td></tr>)}</tbody></table>
-        : <div style={{ font: '11.5px ' + SANS, color: C.mute, marginTop: 8 }}>No evaluated options yet. CREAO's evaluate_plan calls, operator suggestions and what-ifs appear here.</div>}
-      <div style={{ font: '10px/1.5 ' + MONO, color: C.dim, marginTop: 6 }}>*Net benefit = idle-baseline exposure − option exposure − incremental cost − energy delta (an estimate, not revenue). {fin && fin.assumptions.join(' ')}</div>
-    </Panel>
-    <div className="grid gap-3" style={{ gridTemplateColumns: 'minmax(320px, 1fr) minmax(320px, 1.3fr)' }}>
-      <Panel style={{ padding: 12 }}><Label>Invoices (synthetic)</Label>
-        <div className="mt-2 flex flex-col">{invs.map(i => <button key={i.id} onClick={() => setSelInv(i.id)} className="text-left grid py-1.5" style={{ gridTemplateColumns: '1.3fr 1.4fr .8fr .8fr .9fr', font: '11px ' + MONO, color: C.text, borderBottom: '1px solid ' + C.line, background: selInv === i.id ? 'rgba(67,217,245,.06)' : 'transparent' }}>
-          <span style={{ color: C.cyan }}>{i.id}</span><span className="truncate" style={{ color: C.mute }}>{i.provider}</span><span>{fmt$(i.expected_usd)}</span><span>{fmt$(i.invoice_usd)}</span><span style={{ color: i.status === 'RECONCILED' ? C.mint : C.red }}>{i.status}</span></button>)}</div></Panel>
-      <Panel style={{ padding: 12 }}>{sel && sel.detail ? <div>
-        <div className="flex justify-between"><Label color={C.cyan}>{sel.id} · {sel.provider}</Label><span style={{ font: '10px ' + MONO, color: C.mute }}>incident {sel.incident_id}</span></div>
-        <div className="mt-2" style={{ font: '11px/1.7 ' + MONO }}>{sel.detail.invoice.lines.map((l, k) => <div key={k} className="flex justify-between gap-2"><span style={{ color: C.mute }}>{l.sku} · {l.description}</span><span>{l.qty_gpu_hr != null ? l.qty_gpu_hr + ' GPU-h' : l.qty_gb + ' GB'} × {fmt$(l.rate)} = {fmt$(l.usd)}</span></div>)}</div>
-        <div className="grid grid-cols-4 gap-2 mt-3">{[['Expected (metered × rate card)', sel.detail.reconciliation.expected_compute_usd], ['Invoice', sel.detail.reconciliation.invoice_total_usd], ['Variance', sel.detail.reconciliation.variance_usd], ['Unexplained', sel.detail.reconciliation.unexplained_usd]].map(([k, v]) => <div key={k} className="p-2 rounded" style={{ background: C.p2 }}><Label>{k}</Label><div style={{ font: '500 13px ' + MONO, marginTop: 3 }}>{fmt$(v)}</div></div>)}</div>
-        <div className="mt-3"><Label>Evidence</Label>{sel.detail.reconciliation.findings.map((f, k) => <div key={k} style={{ font: '11px/1.55 ' + MONO, color: f.matches ? C.mint : C.red, marginTop: 3 }}>{f.matches ? '✓' : '✗'} {f.line}: {fmt$(f.usd)} ← {f.evidence}; recomputed {fmt$(f.recomputed_usd)}</div>)}
-          <div style={{ font: '11px/1.55 ' + MONO, color: C.mute, marginTop: 6 }}>Usage records: {sel.detail.usage.map(u => u.id + ' ' + u.workload + '@' + u.rack + ' ' + u.gpu_hours + ' GPU-h metered (6 h minimum block)').join('; ') || 'none'}</div></div>
-        <div className="mt-3"><Btn small onClick={async () => { try { await g.api('/api/finance/reconcile', 'POST', { invoice_id: sel.id }); } catch (e) { } }}>Re-run deterministic reconciliation</Btn></div>
-      </div> : <div style={{ font: '11.5px ' + SANS, color: C.mute }}>{sel ? 'Historical synthetic invoice, reconciled in a prior period.' : 'Select an invoice. Incident invoices are generated at closeout from metered usage and transfer records.'}</div>}</Panel>
-    </div>
+    {D.alerts.filter(a => a.status === 'open').slice(0, 3).map(a => <div key={a.id} className="px-4 py-1.5" style={{ font: '11px ' + MONO, color: a.severity === 'high' ? C.red : C.amber, background: a.severity === 'high' ? 'rgba(255,89,110,.06)' : 'rgba(255,187,85,.05)', borderBottom: '1px solid ' + C.line }}>▲ {a.kind.replace(/_/g, ' ')} · {a.text}</div>)}
+    {sub === 'inbox' && <div className="flex-1 min-h-0 grid" style={{ gridTemplateColumns: 'minmax(300px, 0.9fr) minmax(420px, 1.6fr)' }}>
+      <div className="overflow-auto" style={{ borderRight: '1px solid ' + C.line }}>
+        {apRun && <div className="px-3 py-2" style={{ borderBottom: '1px solid ' + C.line, font: '10.5px ' + MONO, color: C.mute }}>CREAO AP Analyst · {apRun.status}{apRun.creao_run_id ? ' · run ' + apRun.creao_run_id.slice(0, 8) : ''}</div>}
+        {D.invoices.map(i => <button key={i.id} onClick={() => setSel(i.id)} className="w-full text-left px-3 py-2.5" style={{ borderBottom: '1px solid ' + C.line, background: inv && inv.id === i.id ? 'rgba(67,217,245,.06)' : 'transparent', opacity: ['paid', 'disputed_resolved'].includes(i.status) ? 0.55 : 1 }}>
+          <div className="flex justify-between gap-2"><span style={{ font: '600 11.5px ' + MONO, color: C.text }}>{i.id}</span><span style={{ font: '500 11.5px ' + MONO, color: C.text }}>{fmt$(i.amount)}</span></div>
+          <div className="flex justify-between gap-2 mt-0.5"><span className="truncate" style={{ font: '10.5px ' + SANS, color: C.mute }}>{i.vendor_name}{i.incident ? ' · ' + i.incident : ''} · {i.date}</span>{chip(i.status.replace(/_/g, ' '), ST_COLOR[i.status] || C.mute)}</div>
+          {i.analysis && !['approved', 'paid'].includes(i.status) && <div className="mt-1" style={{ font: '10px ' + MONO, color: dec(i.analysis.decision) }}>→ {i.analysis.decision.replace('_', ' ')} {i.analysis.decision !== 'hold' ? fmt$(i.analysis.amount) : ''}{agentRecs(i).length ? ' · CREAO ' + agentRecs(i).slice(-1)[0].decision : ''}</div>}
+        </button>)}
+      </div>
+      <div className="overflow-auto p-4">{inv ? <div className="flex flex-col gap-3">
+        <div className="flex justify-between items-start gap-3"><div><div style={{ font: '600 15px ' + MONO, color: C.text }}>{inv.id} <span style={{ color: C.mute, fontWeight: 400 }}>· {inv.vendor_name}</span></div>
+          <div style={{ font: '10.5px ' + MONO, color: C.dim, marginTop: 2 }}>issued {inv.date} · due {inv.due} · period {inv.period}{inv.po ? ' · ' + inv.po : ''} · from {inv.from_email || '—'} · remit {inv.remit_to || '—'}</div></div>{chip(inv.status.replace(/_/g, ' '), ST_COLOR[inv.status] || C.mute)}</div>
+        {inv.note && <div className="p-2.5 rounded" style={{ background: 'rgba(255,89,110,.06)', border: '1px solid rgba(255,89,110,.3)', font: '11.5px/1.5 ' + SANS, color: '#ffc2ca' }}>Message on invoice: “{inv.note}”</div>}
+        <Panel style={{ padding: 10 }}>{inv.lines.map((l, k) => <div key={k} className="flex justify-between" style={{ font: '11.5px ' + MONO, color: C.text }}><span style={{ color: C.mute }}>{l.sku}</span><span>{l.qty.toLocaleString()} × {fmt$(l.rate)} = {fmt$(l.usd)}</span></div>)}</Panel>
+        {inv.analysis && <><Label>Three-way match (contract × meter × invoice)</Label>
+          <div className="flex flex-col gap-1">{inv.analysis.checks.map((c, k) => <div key={k} className="flex gap-2" style={{ font: '11px/1.5 ' + MONO }}><span style={{ color: c.ok ? C.mint : (c.severity === 'info' ? C.mute : c.severity === 'high' ? C.red : C.amber), width: 12 }}>{c.ok ? '✓' : '✗'}</span><span style={{ color: C.text, width: 170, flexShrink: 0 }}>{c.name.replace(/_/g, ' ')}</span><span style={{ color: C.mute }}>{c.detail}{c.source ? <span style={{ color: C.dim }}> · {c.source}</span> : null}</span></div>)}</div>
+          <div className="p-3 rounded" style={{ background: C.p2, border: '1px solid ' + dec(inv.analysis.decision) + '55' }}><div className="flex justify-between"><Label color={dec(inv.analysis.decision)}>Recommendation · {inv.analysis.decision.replace('_', ' ')} {inv.analysis.decision !== 'hold' ? fmt$(inv.analysis.amount) : ''}</Label><span style={{ font: '10px ' + MONO, color: C.mute }}>sign-off: {inv.analysis.approver_required}</span></div>
+            <div style={{ font: '12px/1.55 ' + SANS, color: C.text, marginTop: 4 }}>{inv.analysis.reason}</div>{inv.analysis.segregation && <div style={{ font: '10.5px ' + MONO, color: C.amber, marginTop: 4 }}>Segregation of duties: {inv.analysis.segregation}</div>}</div></>}
+        {agentRecs(inv).map((d, k) => <div key={k} className="p-3 rounded" style={{ background: 'rgba(67,217,245,.05)', border: '1px solid rgba(67,217,245,.2)' }}><Label color={C.cyan}>CREAO AP Analyst · {d.decision} {fmt$(d.amount)} · {d.actor}</Label><div style={{ font: '11.5px/1.55 ' + SANS, color: '#c7d6e6', marginTop: 4 }}>{d.reason}</div></div>)}
+        {drafts(inv).slice(-1).map((d, k) => <div key={k} className="p-3 rounded" style={{ background: C.p2, border: '1px solid ' + C.line2 }}><Label>Dispute email draft (not sent)</Label><pre style={{ whiteSpace: 'pre-wrap', font: '11px/1.55 ' + SANS, color: C.text, margin: '6px 0 0' }}>{d.reason}</pre></div>)}
+        {!['paid', 'disputed_resolved', 'approved'].includes(inv.status) && <div className="flex flex-col gap-2">
+          <input value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => e.stopPropagation()} placeholder={inv.analysis && inv.analysis.decision === 'hold' ? "verified: called vendor at number on file, confirmed…" : 'Note for the audit trail (optional)'} className="rounded-full px-3 outline-none" style={{ background: C.p2, border: '1px solid ' + C.line2, color: C.text, font: '11.5px ' + SANS, height: 30 }} />
+          <div className="flex gap-2 flex-wrap"><Btn tone="mint" disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/approve', { note }, 'Approved and posted')}>Approve as controller</Btn>
+            <Btn tone="danger" disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/dispute', { note }, 'Disputed')}>Dispute</Btn>
+            <Btn disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/hold', { note }, 'Held')}>Hold</Btn></div></div>}
+        <Label>Audit trail</Label>
+        <div className="flex flex-col gap-0.5">{inv.decisions.map((d, k) => <div key={k} style={{ font: '10.5px/1.5 ' + MONO, color: C.mute }}>{new Date(d.ts * 1000).toLocaleString()} · <span style={{ color: C.text }}>{d.actor}</span> · {d.kind} · {d.decision}{d.amount ? ' ' + fmt$(d.amount) : ''}</div>)}</div>
+      </div> : <div style={{ color: C.mute, font: '12px ' + SANS }}>No invoices.</div>}</div>
+    </div>}
+    {sub === 'explorer' && <div className="flex-1 overflow-auto p-4 flex flex-col gap-3">
+      <div className="flex items-center gap-2"><Label>Group by</Label>{['service', 'vendor', 'incident', 'acct'].map(k => <button key={k} onClick={() => setGroupBy(k)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '3px 10px', color: groupBy === k ? '#04121a' : C.mute, background: groupBy === k ? C.cyan : 'transparent', border: '1px solid ' + C.line }}>{k}</button>)}<span className="ml-auto" style={{ font: '10px ' + MONO, color: C.dim }}>Posted expense lines from the general ledger · log scale</span></div>
+      <Panel style={{ padding: 10 }}><EChart option={explorerOpt} height={260} /></Panel>
+      <div className="grid gap-3" style={{ gridTemplateColumns: 'minmax(320px,1.2fr) minmax(300px,1fr)' }}>
+        <Panel style={{ padding: 12 }}><Label>{groupBy} · {month} vs all time</Label>{totals.map(([k, m, a]) => <div key={k} className="flex justify-between" style={{ font: '11.5px/1.9 ' + MONO, borderBottom: '1px solid ' + C.line }}><span style={{ color: C.text }}>{k}</span><span style={{ color: C.mute }}>{fmt$(m)} <span style={{ color: C.dim }}>· {fmt$(a)}</span></span></div>)}</Panel>
+        <Panel style={{ padding: 12 }}><Label>October budgets</Label>{Object.entries(D.budgets).map(([a, b]) => { const pct = b.actual / b.budget; return <div key={a} className="mt-2"><div className="flex justify-between" style={{ font: '11px ' + MONO, color: C.text }}><span>{a} {b.name.replace('COGS - ', '')}</span><span style={{ color: pct > 1 ? C.red : pct > 0.8 ? C.amber : C.mute }}>{fmt$(b.actual)} / {fmt$(b.budget)}</span></div><div style={{ height: 5, background: C.p2, borderRadius: 3, marginTop: 3 }}><div style={{ width: Math.min(100, pct * 100) + '%', height: 5, borderRadius: 3, background: pct > 1 ? C.red : pct > 0.8 ? C.amber : C.cyan }} /></div></div>; })}</Panel>
+      </div></div>}
+    {sub === 'incidents' && <div className="flex-1 overflow-auto p-4 flex flex-col gap-3">
+      {plan && inc.state !== 'CLOSED' && <Panel style={{ padding: 12 }}><Label color={C.amber}>Live · cost approval for {plan.plan_id} v{plan.version} ({inc.id})</Label>
+        <div className="grid grid-cols-4 gap-2 mt-2">{[['Incremental cost', fmt$(plan.finance.incremental_cost_usd)], ['Burst budget left', fmt$(b52.budget - b52.actual)], ['After this plan', fmt$(b52.budget - b52.actual - plan.finance.incremental_cost_usd)], ['SLA exposure avoided', fmt$(Math.max(0, plan.baseline.sla_exposure_usd - plan.finance.sla_exposure_usd))]].map(([k, v]) => <div key={k} className="p-2 rounded" style={{ background: C.p2 }}><Label>{k}</Label><div style={{ font: '500 13px ' + MONO, color: C.text, marginTop: 3 }}>{v}</div></div>)}</div>
+        <div style={{ font: '11px/1.5 ' + SANS, color: C.mute, marginTop: 6 }}>Policy {plan.policy.decision.replace('_', ' ')} · {plan.policy.plan_rules.filter(r => r.decision !== 'AUTO_ALLOWED').map(r => r.rule).join(' · ') || 'no cost rule triggered'}. On execution the cost is accrued (Dr 5200 / Cr 2100); the vendor invoice is matched against it at closeout.</div></Panel>}
+      <Panel style={{ padding: 12 }}><Label>Post-incident cost report</Label>
+        <table className="w-full mt-2" style={{ font: '11px ' + MONO, color: C.text, borderCollapse: 'collapse' }}><thead><tr style={{ color: C.dim, textAlign: 'left' }}>{['Incident', 'Accrued at execution', 'Booked expense', 'Invoiced', 'Paid', 'Exceptions', 'Invoices'].map(h => <th key={h} style={{ padding: 6, borderBottom: '1px solid ' + C.line, fontWeight: 500 }}>{h}</th>)}</tr></thead>
+          <tbody>{incRows.map(r => <tr key={r.id} style={{ borderBottom: '1px solid ' + C.line }}><td style={{ padding: 6, color: C.cyan }}>{r.id}</td><td style={{ padding: 6 }}>{fmt$(r.accrued)}</td><td style={{ padding: 6 }}>{fmt$(r.booked)}</td><td style={{ padding: 6 }}>{fmt$(r.invoiced)}</td><td style={{ padding: 6 }}>{fmt$(r.paid)}</td><td style={{ padding: 6, color: r.disputed ? C.red : C.mute }}>{r.disputed || '—'}</td><td style={{ padding: 6, color: C.mute }}>{r.invs.map(i => i.id + ' (' + i.status.replace(/_/g, ' ') + ')').join(', ')}</td></tr>)}</tbody></table></Panel>
+    </div>}
+    {sub === 'ledger' && <div className="flex-1 overflow-auto p-4 grid gap-3" style={{ gridTemplateColumns: 'minmax(300px,0.8fr) minmax(420px,1.5fr)' }}>
+      <div className="flex flex-col gap-3"><Panel style={{ padding: 12 }}><div className="flex justify-between"><Label>Trial balance</Label><span style={{ font: '600 10px ' + MONO, color: Math.abs(D.trial_balance.total_debit - D.trial_balance.total_credit) < 0.01 ? C.mint : C.red }}>{Math.abs(D.trial_balance.total_debit - D.trial_balance.total_credit) < 0.01 ? 'BALANCED' : 'OUT OF BALANCE'}</span></div>
+        {D.trial_balance.rows.filter(r => r.debit || r.credit).map(r => <div key={r.acct} className="grid" style={{ gridTemplateColumns: '1fr 90px 90px', font: '11px/1.9 ' + MONO, borderBottom: '1px solid ' + C.line }}><span style={{ color: C.text }}>{r.acct} {r.name}</span><span style={{ textAlign: 'right' }}>{r.debit ? fmt$(r.debit) : ''}</span><span style={{ textAlign: 'right' }}>{r.credit ? fmt$(r.credit) : ''}</span></div>)}
+        <div className="grid" style={{ gridTemplateColumns: '1fr 90px 90px', font: '600 11px/2 ' + MONO }}><span>Total</span><span style={{ textAlign: 'right' }}>{fmt$(D.trial_balance.total_debit)}</span><span style={{ textAlign: 'right' }}>{fmt$(D.trial_balance.total_credit)}</span></div></Panel>
+        <Panel style={{ padding: 12 }}><Label>Bank feed (Mercury operating)</Label>{D.bank.map(b => <div key={b.id} className="flex justify-between" style={{ font: '10.5px/1.8 ' + MONO }}><span style={{ color: C.mute }}>{b.date} {b.counterparty}</span><span style={{ color: C.text }}>{fmt$(b.amount)} <span style={{ color: b.matched ? C.mint : C.amber }}>{b.matched ? '↔ ' + b.matched : 'unmatched'}</span></span></div>)}</Panel></div>
+      <Panel style={{ padding: 12 }}><Label>Journal (newest first) · every entry balanced, attributed and sourced</Label>
+        {D.journal.map(j => <div key={j.id} className="py-2" style={{ borderBottom: '1px solid ' + C.line }}><div className="flex justify-between gap-2"><span style={{ font: '600 11px ' + MONO, color: C.cyan }}>{j.id} <span style={{ color: C.mute, fontWeight: 400 }}>{j.date}</span></span><span style={{ font: '10px ' + MONO, color: C.dim }}>{j.actor}{j.approved_by ? ' · approved ' + j.approved_by : ''} · src {j.source}</span></div>
+          <div style={{ font: '11px ' + SANS, color: C.text, margin: '2px 0' }}>{j.memo}</div>
+          {j.lines.map((l, k) => <div key={k} className="grid" style={{ gridTemplateColumns: '1fr 90px 90px', font: '10.5px ' + MONO, color: C.mute }}><span>{l.cr ? '   ' : ''}{l.acct} {(D.trial_balance.rows.find(r => r.acct === l.acct) || {}).name}{l.incident ? ' · ' + l.incident : ''}</span><span style={{ textAlign: 'right' }}>{l.dr ? fmt$(l.dr) : ''}</span><span style={{ textAlign: 'right' }}>{l.cr ? fmt$(l.cr) : ''}</span></div>)}</div>)}</Panel>
+    </div>}
+    {sub === 'proof' && <div className="flex-1 overflow-auto p-4 grid gap-3" style={{ gridTemplateColumns: 'minmax(420px,1.4fr) minmax(300px,1fr)' }}>
+      <Panel style={{ padding: 12 }}><div className="flex justify-between items-baseline"><Label color={C.mint}>Planted errors vs answer key</Label><span style={{ font: '600 12px ' + MONO, color: C.mint }}>{D.score.correct}/{D.score.total} correct · {D.score.caught}/{D.score.planted_errors} errors caught · {D.score.false_flags} false flags</span></div>
+        <table className="w-full mt-2" style={{ font: '11px ' + MONO, color: C.text, borderCollapse: 'collapse' }}><thead><tr style={{ color: C.dim, textAlign: 'left' }}>{['Invoice', 'Planted', 'Expected', 'System', ''].map(h => <th key={h} style={{ padding: 6, borderBottom: '1px solid ' + C.line, fontWeight: 500 }}>{h}</th>)}</tr></thead>
+          <tbody>{D.score.cases.map(c => <tr key={c.invoice_id} style={{ borderBottom: '1px solid ' + C.line }}><td style={{ padding: 6, color: C.cyan }}>{c.invoice_id}</td><td style={{ padding: 6, color: C.mute, maxWidth: 300 }}>{c.planted}</td><td style={{ padding: 6 }}>{c.expected} {fmt$(c.expected_amount)}</td><td style={{ padding: 6 }}>{c.system} {fmt$(c.system_amount)}</td><td style={{ padding: 6, color: c.correct ? C.mint : C.red }}>{c.correct ? '✓' : '✗'}</td></tr>)}</tbody></table>
+        <div style={{ font: '10.5px/1.5 ' + SANS, color: C.dim, marginTop: 8 }}>The answer key is stored separately and never shown to the matcher or the CREAO agent. Scoring re-runs the deterministic analysis on every invoice.</div></Panel>
+      <div className="flex flex-col gap-3"><Panel style={{ padding: 12 }}><Label>Controls</Label><div style={{ font: '11.5px/1.7 ' + SANS, color: C.text, marginTop: 4 }}>
+        <div>· The autonomous AP seat approves only clean three-way matches up to {fmt$(D.policy.agent_approval_limit_usd)}.</div><div>· Everything else needs the controller ({D.people.controller}).</div><div>· The requester of a purchase cannot approve its invoice ({D.people.facilities}).</div><div>· Bank detail changes are held until a callback to the number on file is recorded.</div><div>· Price variances are disputed at any amount; quantity variances under {fmt$(D.policy.materiality_usd)} are approved and logged.</div><div>· Every journal entry must balance; the ledger refuses one that does not.</div><div>· Open vendor credits are applied to the earliest eligible invoice, even months later.</div></div></Panel>
+        <Panel style={{ padding: 12 }}><Label>Real vs simulated</Label><div style={{ font: '11px/1.6 ' + SANS, color: C.mute, marginTop: 4 }}><div style={{ color: C.mint, font: '600 9.5px ' + MONO }}>REAL</div>Double-entry ledger and trial balance · three-way matching · approval limits and segregation of duties · payment runs · CREAO AP Analyst runs · audit trail · scoring<div style={{ color: C.amber, font: '600 9.5px ' + MONO, marginTop: 6 }}>SIMULATED</div>Vendors, invoices, bank feed and company history (Mar to Oct 2026), with planted errors</div></Panel></div>
+    </div>}
   </div>;
 }
 
@@ -770,7 +836,7 @@ function UserDiv() {
       <div className="flex items-center gap-2"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke={C.cyan} strokeWidth="1.6" /><path d="M7 15l3-3 3 2 4-5" stroke={C.cyan} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /><circle cx="17" cy="9" r="1.6" fill={C.red} /></svg>
         <span style={{ font: '600 13px ' + SANS, letterSpacing: '.14em' }}>GRIDPILOT</span></div>
       <span style={{ font: '500 10.5px ' + MONO, color: C.mute, letterSpacing: '.12em' }}>ATLAS COMPUTE · SFO-01 · <span style={{ color: g.conn === 'live' ? C.mint : C.amber }}>{g.conn === 'live' ? 'SIMULATION LIVE' : g.conn.toUpperCase()}</span></span>
-      <div className="flex ml-4 gap-1">{[['control', 'Control Room'], ['finops', 'FinOps'], ['agents', 'Agent Operations'], ['settings', 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
+      <div className="flex ml-4 gap-1">{[['control', 'Control Room'], ['finops', 'Finance desk'], ['agents', 'Agent Operations'], ['settings', 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
       <div className="ml-auto flex items-center gap-4" style={{ font: '500 10.5px ' + MONO, color: C.mute }}>
         <span>HEALTH <b style={{ color: health[1] }}>{health[0]}</b></span>
         <span>INCIDENT <b style={{ color: inc && inc.state !== 'CLOSED' ? C.red : C.mint }}>{inc && inc.state !== 'CLOSED' ? inc.severity + ' ' + inc.id : 'NONE'}</b></span>
@@ -792,7 +858,7 @@ function UserDiv() {
       <Metric label="SLA risk · exposure" value={breaches} unit={breaches === 1 ? 'breach' : 'breaches'} sub={exposure ? fmt$(exposure) + '/min if sustained (conditional)' : 'no conditional exposure'} tone={breaches ? C.red : C.mint} />
     </div>
     {tab === 'control' && <ControlRoom g={g} setModal={setModal} toast={toast} />}
-    {tab === 'finops' && <FinOps g={g} />}
+    {tab === 'finops' && <FinanceDesk g={g} toast={toast} />}
     {tab === 'agents' && <AgentOps g={g} />}
     {tab === 'settings' && <Settings g={g} toast={toast} />}
     <CallOverlay g={g} />
