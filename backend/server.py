@@ -47,6 +47,12 @@ def owner_only(req):
         raise web.HTTPForbidden(text=json.dumps({"error": "owner authentication required"}), content_type="application/json")
     return OWNER
 
+def viewer(req):
+    """Any signed-in Mana user (verified by forward-auth) may watch. Approvals, settings and payments stay owner-only."""
+    u = req.headers.get("X-Sender-Uid")
+    if not u: raise web.HTTPUnauthorized(text=json.dumps({"error": "sign in to Mana to view"}), content_type="application/json")
+    return u
+
 # ---------------------------------------------------------------- views
 def plan_view(p):
     if not p: return None
@@ -176,7 +182,7 @@ async def health(req): return jresp({"ok": True, "sim_t": round(SIM.t, 1)})
 
 @routes.get("/api/ws-ticket")
 async def ws_ticket(req):
-    owner_only(req); t = secrets.token_urlsafe(16); TICKETS[t] = time.time() + 60; return jresp({"ticket": t})
+    viewer(req); t = secrets.token_urlsafe(16); TICKETS[t] = time.time() + 60; return jresp({"ticket": t})
 
 @routes.get("/ws")
 async def ws_handler(req):
@@ -190,7 +196,7 @@ async def ws_handler(req):
     CLIENTS.discard(ws); return ws
 
 @routes.get("/api/state")
-async def api_state(req): owner_only(req); return jresp(full_state())
+async def api_state(req): viewer(req); return jresp(full_state())
 
 @routes.get("/api/facility/state")
 async def api_fac(req): owner_only(req); return jresp(SIM.snapshot(field=False))
@@ -210,7 +216,12 @@ async def api_reset(req):
 
 @routes.post("/api/simulation/inject")
 async def api_inject(req):
-    owner_only(req); b = await req.json()
+    u = viewer(req); b = await req.json()
+    if u != OWNER:   # visitors may start the demo scenario only when nothing is in progress
+        cur = ENG.open_incident()
+        if b.get("kind") != "thermal" or (cur and cur["state"] not in ("CLOSED",)):
+            return jresp({"ok": False, "message": "visitors can start the demo incident only when no incident is in progress"}, 403)
+        ENG.event(None, "visitor_demo_started", "visitor:" + u[:8], {})
     if b.get("kind") not in ("thermal", "repair_c02", "arm_post_apply_failure", "repair_rack_faults"): return jresp({"error": "unsupported injection (thermal path is the implemented scenario)"}, 400)
     ENG.inject(b["kind"]); return jresp({"ok": True})
 
@@ -360,7 +371,7 @@ async def api_prepare(req):
     DIRTY["v"] = True; return jresp({"ok": True, "agents": out})
 
 @routes.get("/api/finance/desk")
-async def api_desk(req): owner_only(req); return jresp(DESK.snapshot())
+async def api_desk(req): viewer(req); return jresp(DESK.snapshot())
 
 @routes.post("/api/finance/invoices/{id}/{action}")
 async def api_inv_action(req):

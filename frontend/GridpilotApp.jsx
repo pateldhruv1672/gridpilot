@@ -312,7 +312,7 @@ const STEPS = [
   ['EXEC', 'Execution', ['EXECUTING']], ['VALID', 'Validation', ['VALIDATING']], ['RECOVERY', 'Recovery', ['MONITORING_RECOVERY', 'RESOLVED', 'FINANCIAL_RECONCILIATION', 'CLOSED']],
 ];
 const ORDER = ['DETECTED', 'TRIAGING', 'PLAN_PROPOSED', 'POLICY_CHECKED', 'AWAITING_APPROVAL', 'APPROVED', 'EXECUTING', 'VALIDATING', 'MONITORING_RECOVERY', 'RESOLVED', 'FINANCIAL_RECONCILIATION', 'CLOSED'];
-const fmt$ = (v) => v == null ? '—' : '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt$ = (v) => v == null ? '—' : (Number(v) < -0.004 ? '-$' : '$') + Math.abs(Number(v)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtT = (s) => { s = Math.max(0, Math.round(s || 0)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return (h ? String(h).padStart(2, '0') + ':' : '') + String(m).padStart(2, '0') + ':' + String(x).padStart(2, '0'); };
 const ago = (ts) => { const d = (Date.now() / 1000 - ts); return d < 60 ? Math.round(d) + 's ago' : d < 3600 ? Math.round(d / 60) + 'm ago' : Math.round(d / 3600) + 'h ago'; };
 function actionText(a) {
@@ -842,7 +842,7 @@ function UserDiv() {
         <span>INCIDENT <b style={{ color: inc && inc.state !== 'CLOSED' ? C.red : C.mint }}>{inc && inc.state !== 'CLOSED' ? inc.severity + ' ' + inc.id : 'NONE'}</b></span>
         <span>T+{snap ? fmtT(snap.t) : '--:--'}</span>
         <span>MODE <b style={{ color: C.cyan }}>AUTONOMOUS · HUMAN-GATED</b></span>
-        <span title="Verified Mana identity used for console approvals">OP {userId.slice(0, 6)}</span>
+        {userId === ownerId ? <span title="Verified Mana identity used for console approvals">OP {userId.slice(0, 6)}</span> : <span title="Live view for visitors. Approvals, payments and settings belong to the operator." style={{ color: C.amber }}>VISITOR · LIVE VIEW</span>}
         <div className="relative"><Btn small onClick={() => setDemoOpen(!demoOpen)}>Demo ▾</Btn>
           {demoOpen && <div className="absolute right-0 mt-2 z-50 flex flex-col py-1" style={{ width: 230, background: C.p2, border: '1px solid ' + C.line2, borderRadius: 10, boxShadow: '0 20px 50px rgba(0,0,0,.5)' }}>
             {[['thermal', 'Start thermal incident (C02 degrades)'], ['arm_post_apply_failure', 'Arm post-apply failure (rollback demo)'], ['repair_c02', 'Repair C02'], ['repair_rack_faults', 'Repair rack fan faults'], ['reset', 'Reset demo']].map(([k, l]) => <button key={k} onClick={() => demo(k)} className="text-left px-3 py-2 hover:bg-white/5" style={{ font: '11.5px ' + SANS, color: k === 'reset' ? C.amber : C.text }}>{l}</button>)}
