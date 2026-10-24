@@ -1215,3 +1215,11 @@ let me know which api keys are required and how to add them, do not mock actual 
 - Visuals (3D twin, heatmaps, airflow, propagation, migration animations, agent panel, FinOps, audit) unchanged.
 - Three components: CREAO (intelligence/coordination), Cartesia (human intervention), GRIDPILOT backend + digital twin.
 - Priority: one fully functional autonomous R17 overheating incident end to end before secondary incidents.
+
+
+## Architecture update 3: Dynamic CREAO specialists (2026-10-24)
+
+- Agent creation uses the CREAO CLI account API (`cr_sk_` key saved as `CREAO_CLI_KEY`): `POST https://developer.creao.ai/v1/agents` starts a natural-language creation run; the backend polls `GET /v1/runs/{run_id}` for `agent_id`, caches the agent per kind + brief hash, and runs it with `POST /v1/runs {agent_id, input: {request}}`. The app-scoped `capi_` key cannot create agents.
+- Built-in specialist kinds and deterministic triggers: `thermal_forensics` (post-apply failure + verified rollback), `capacity_planner` (validation failure before apply), `finops_auditor` (invoice does not reconcile), `sla_guardian` (protected-SLA workload in breach at detection). The Remediation Agent can create new kinds on the fly with `request_specialist {kind, question, mission}`; the owner can too from Agent Operations. Max 4 specialists per incident.
+- Specialists get a scoped tool token (read + evaluate only: no propose_plan, no request_execution). Their recommended actions are re-run through the deterministic forecast, finance and policy engines. On failure paths the specialist runs first and its findings feed the Remediation Agent's replan (timeout 420 s). A recommendation can be adopted as a new plan version by the owner, and it still needs policy and human approval.
+- With a CLI key and no App ID, the Remediation Agent itself is created through the CLI from docs/CREAO_AGENT.md.
