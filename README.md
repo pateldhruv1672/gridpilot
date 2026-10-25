@@ -139,3 +139,9 @@ GRIDPILOT keeps the physical layer behind one tool API, so production is the sam
 3. **Identity and roles:** map the existing seats (agent, AP agent, controller, on-call operator, owner) to SSO groups; policy limits and separation of duties stay enforced in the backend.
 4. **State and audit:** SpacetimeDB remains the live state bus with one authorized writer; the audit log is exported to the company's SIEM and finance decisions to the ERP.
 5. **Rollout:** shadow mode first (agents propose, nothing executes), then human-approved execution, then autonomous execution only inside the AUTO_ALLOWED policy envelope.
+
+
+## Real-time delivery under load
+
+- Forecast simulations (plan evaluation, maintenance what-ifs) run in a forkserver process pool (`backend/forecast_pool.py`, 3 workers) instead of threads. In threads they held the GIL and starved the asyncio loop: during the compound storm the loop managed about one tick every 4 s and dashboards stopped updating. Results are identical to the in-thread versions (verified series-for-series).
+- State is pushed as `state_patch` messages containing only the sections that changed since the last push to that client (about 100 KB instead of 500 KB), at most once per second; twin and GPU data stream in ticks. Sends are non-blocking per client, so one slow browser can never stall the simulation loop.
