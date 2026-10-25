@@ -35,9 +35,39 @@ OPTIONS = {}           # incident -> list of evaluated options (summaries) for c
 DIRTY = {"v": True}
 ENG.notify = lambda: DIRTY.__setitem__("v", True)
 import finance_desk as FD
+import twin as TW, predict as PR, reliability as RL
 DESK = FD.Desk(ENG.db, notify=lambda: DIRTY.__setitem__("v", True), event=ENG.event)
 ENG.desk = DESK
 if not ENG.db.one("select id from ap_decisions where kind='recommendation' limit 1"): DESK.autonomous_pass()
+
+def boot_twin():
+    p = os.path.join(STATE, "twin.pkl")
+    if os.path.exists(p):
+        try: return pickle.load(open(p, "rb"))
+        except Exception: traceback.print_exc()
+    t = TW.Twin(); t.t = SIM.t; t._last_series = SIM.t - 99; return t
+TWIN = boot_twin(); PRED = PR.Predictor()
+async def _start_agent(*a): return await start_fin_agent(*a)
+REL = RL.Reliability(ENG, TWIN, PRED, _start_agent, lambda: DIRTY.__setitem__("v", True))
+def _rel_hook(r, st, data):
+    if r["task"] != "specialist:reliability": return
+    wo = REL.get(data.get("work_order") or "")
+    if wo and wo["state"] == "PLANNING":
+        REL.transition(wo, "AWAITING_PLAN", "backend", "CREAO run %s finished (%s) without proposing a plan; operator can re-run planning" % (r["id"], st))
+ENG.hooks = [_rel_hook]
+TICKN = {"n": 0}
+
+def preds_payload():
+    out = {}
+    for aid, p in PRED.preds.items():
+        out[aid] = {k: p.get(k) for k in ("risk", "rul_s", "rul_lo_s", "rul_hi_s", "p_fail_5m", "p_fail_15m", "signal", "value", "unit", "alarm", "hi", "model", "projection", "n")}
+    return out
+
+def twin_payload():
+    t = TWIN.snapshot(PRED.preds)
+    t["predictions"] = preds_payload()
+    t["history"] = {aid: PRED.history(aid, 90) for aid in PRED.hist}
+    return t
 
 def clipj(x, n=6000):
     t = E.jd(x)
@@ -122,7 +152,8 @@ def full_state():
     incs = [{"id": r["id"], "state": r["state"], "rack": r["rack"], "created": r["created"]} for r in ENG.db.all("select id,state,rack,created from incidents order by created desc limit 20")]
     return {"incident": incident_detail(inc), "incidents": incs, "events": evs, "finance": finance_summary(), "integrations": integrations_status(),
             "series": list(ENG.series), "config_log": CS.log(15), "thresholds": S.THRESH, "speed": ENG.speed, "paused": ENG.paused,
-            "fail_armed": ENG.fail_armed, "sim_t": round(SIM.t, 1), "evidence": EVIDENCE, "specialists": specialist_runs(), "desk": DESK.snapshot()}
+            "fail_armed": ENG.fail_armed, "sim_t": round(SIM.t, 1), "evidence": EVIDENCE, "specialists": specialist_runs(), "desk": DESK.snapshot(),
+            "work_orders": REL.list(), "pm_proof": PRED.proof(), "twin": twin_payload(), "agent_summary": agent_summary(), "loops": loops()}
 
 def specialist_runs():
     out = []
@@ -149,6 +180,16 @@ async def sim_loop():
             if not ENG.paused:
                 SIM.step(0.5, speed=ENG.speed)
                 ENG.tick()
+                dtw = SIM.t - TWIN.t
+                if dtw < 0: TWIN.t = SIM.t; dtw = 0
+                for kind, aid in TWIN.step(SIM, dtw): REL.on_twin_event(kind, aid); DIRTY["v"] = True
+                mc = getattr(TWIN, "mode_changed", None)
+                if mc:
+                    TWIN.mode_changed = None
+                    ENG.event(None, "bess_dispatch", "agent:energy", {"mode": mc[1], "soc_pct": round(TWIN.bess["soc"] * 100, 1), "site_time": TWIN.snapshot({})["site_time"], "tariff": TW.tariff(TWIN.site_hour()),
+                              "policy": "autonomous within bounds: peak shaving only above 40% SoC reserve, charge off-peak"})
+                for aid, p in PRED.observe(TWIN): ENG.spawn(REL.on_alert(aid, p))
+                REL.tick()
                 if int(SIM.t) % 2 == 0 or True:
                     for i in range(64):
                         rid = S.rack_id(i // 8, i % 8)
@@ -156,7 +197,8 @@ async def sim_loop():
                             HIST[rid].append((round(SIM.t, 1), round(float(SIM.gpu_t[i]), 1), round(float(SIM.inlet[i]), 1), round(float(SIM.P[i]), 2)))
             snap = SIM.snapshot(field=True)
             inc = ENG.status()
-            msg = {"type": "tick", "snap": snap, "series_point": ENG.series[-1] if ENG.series else None,
+            TICKN["n"] += 1
+            msg = {"type": "tick", "snap": snap, "twin": twin_payload() if TICKN["n"] % 4 == 0 else None, "series_point": ENG.series[-1] if ENG.series else None,
                    "incident_brief": {"id": inc["id"], "state": inc["state"], "rack": inc["rack"]} if inc else None, "speed": ENG.speed, "paused": ENG.paused}
             payload = E.jd(msg)
             full = E.jd({"type": "state", "state": full_state()}) if DIRTY["v"] else None
@@ -168,6 +210,7 @@ async def sim_loop():
                 except Exception: CLIENTS.discard(ws)
             if time.time() - last_save > 15:
                 last_save = time.time(); pickle.dump(SIM, open(os.path.join(STATE, "sim.pkl.tmp"), "wb")); os.replace(os.path.join(STATE, "sim.pkl.tmp"), os.path.join(STATE, "sim.pkl"))
+                pickle.dump(TWIN, open(os.path.join(STATE, "twin.pkl.tmp"), "wb")); os.replace(os.path.join(STATE, "twin.pkl.tmp"), os.path.join(STATE, "twin.pkl"))
                 ENG.db.set("cost_accum", ENG.cost)
         except Exception:
             traceback.print_exc()
@@ -224,6 +267,10 @@ async def api_reset(req):
     new = S.Sim(CS.read_tree())
     SIM.__dict__.update(new.__dict__)
     ENG.fail_armed = False; ENG.crit_count = {}; ENG.series.clear(); ENG._last_energy = SIM.energy_kwh
+    TWIN.__dict__.update(TW.Twin().__dict__); TWIN.t = SIM.t; TWIN._last_series = SIM.t - 99
+    PRED.__dict__.update(PR.Predictor().__dict__); REL.watch.clear(); SIM.surge = {}; SIM._derive()
+    for r in ENG.db.all("select id from work_orders where state not in ('CLOSED','REJECTED','FAILED')"):
+        wo = REL.get(r["id"]); REL.transition(wo, "CLOSED", "operator:" + OWNER[:6], "demo reset")
     ENG.event(None, "demo_reset", "operator:" + OWNER[:6], {"config_sha": sha})
     return jresp({"ok": True})
 
@@ -232,11 +279,25 @@ async def api_inject(req):
     u = viewer(req); b = await req.json()
     if u != OWNER:   # visitors may start the demo scenario only when nothing is in progress
         cur = ENG.open_incident()
-        if b.get("kind") != "thermal" or (cur and cur["state"] not in ("CLOSED",)):
+        if b.get("kind") not in ("thermal", "crah_bearing_wear") or (cur and cur["state"] not in ("CLOSED",)):
             return jresp({"ok": False, "message": "visitors can start the demo incident only when no incident is in progress"}, 403)
         ENG.event(None, "visitor_demo_started", "visitor:" + u[:8], {})
-    if b.get("kind") not in ("thermal", "repair_c02", "arm_post_apply_failure", "repair_rack_faults"): return jresp({"error": "unsupported injection (thermal path is the implemented scenario)"}, 400)
-    ENG.inject(b["kind"]); return jresp({"ok": True})
+    k = b.get("kind")
+    if k in ("crah_bearing_wear", "ups_aging", "security_anomaly", "repair_all"):
+        TWIN.inject(k, SIM)
+        if k == "crah_bearing_wear":
+            for w in ["inference_api_07", "inference_api_12", "batch_embed_03"]:
+                if SIM.config["workloads"].get(w, {}).get("rack") == "R17": SIM.surge[w] = 0.15
+            SIM._derive()
+        if k == "repair_all":
+            for j in range(4): SIM.degrade_unit(j, 1.0, 1.0)
+        if k == "security_anomaly":
+            for e in TWIN.security[-2:]:
+                ENG.event(None, "security_alert", "agent:security-watcher", {**e, "decision": "escalate to human: no autonomous action on access or firmware events", "policy": "P-F1 firmware changes forbidden for agents"})
+        ENG.event(None, "demo_injection", "demo-control:" + u[:6], {"kind": k}); DIRTY["v"] = True
+        return jresp({"ok": True})
+    if k not in ("thermal", "repair_c02", "arm_post_apply_failure", "repair_rack_faults"): return jresp({"error": "unsupported injection"}, 400)
+    ENG.inject(k); return jresp({"ok": True})
 
 @routes.post("/api/simulation/speed")
 async def api_speed(req):
@@ -260,6 +321,37 @@ async def api_approve(req):
     uid = owner_only(req); b = await req.json()
     ok, msg = ENG.verify_approval(req.match_info["id"], b.get("plan_id"), b.get("plan_version"), "dashboard", "operator:" + uid[:8])
     return jresp({"ok": ok, "message": msg}, 200 if ok else 409)
+
+@routes.post("/api/maintenance/{id}/approve")
+async def api_wo_approve(req):
+    uid = owner_only(req); b = await req.json()
+    ok, msg = await REL.approve(req.match_info["id"], b.get("version"), "operator:" + uid[:8])
+    return jresp({"ok": ok, "message": msg}, 200 if ok else 409)
+
+@routes.post("/api/maintenance/{id}/reject")
+async def api_wo_reject(req):
+    uid = owner_only(req); b = await req.json()
+    try: REL.reject(req.match_info["id"], "operator:" + uid[:8], b.get("reason") or "rejected from console"); return jresp({"ok": True, "message": "rejected"})
+    except Exception as e: return jresp({"ok": False, "message": str(e)}, 409)
+
+@routes.post("/api/maintenance/{id}/plan")
+async def api_wo_plan(req):
+    uid = owner_only(req); b = await req.json() if req.can_read_body else {}
+    wo = REL.get(req.match_info["id"])
+    if not wo or wo["state"] in ("CLOSED", "REJECTED", "FAILED", "SCHEDULED", "IN_MAINTENANCE"): return jresp({"ok": False, "message": "work order not open for planning"}, 409)
+    ref = await REL.start_planning(wo["id"], "operator:" + uid[:8], (b or {}).get("note"))
+    return jresp({"ok": bool(ref), "message": ("CREAO Reliability Agent run " + ref) if ref else "CREAO not available"})
+
+@routes.post("/api/maintenance/{id}/evaluate")
+async def api_wo_eval(req):
+    owner_only(req); b = await req.json()
+    try: return jresp(await REL.evaluate(req.match_info["id"], b.get("actions", []), b.get("maintenance_start_in_s")))
+    except Exception as e: return jresp({"error": str(e)}, 400)
+
+@routes.get("/api/trace/{kind}/{id}")
+async def api_trace(req):
+    viewer(req); k, i = req.match_info["kind"], req.match_info["id"]
+    return jresp(build_trace(k, i))
 
 @routes.post("/api/incidents/{id}/renew-approval")
 async def api_renew(req):
@@ -431,7 +523,7 @@ async def start_fin_agent(kind, name, text, tools, request, meta):
     cfg = ENG.creao_config()
     if not cfg["cli"] or not cfg["base"]: return None, "CREAO key not available"
     local = "AP-%s" % secrets.token_hex(4); token = secrets.token_urlsafe(24)
-    ENG.tokens[token] = {"incident_id": None, "task": kind, "run_ref": local, "expires": time.time() + 3600, "allowed": tools}; ENG.db.set("tool_tokens", ENG.tokens)
+    ENG.tokens[token] = {"incident_id": None, "task": kind, "run_ref": local, "expires": time.time() + 3600, "allowed": tools, "work_order": request.get("work_order")}; ENG.db.set("tool_tokens", ENG.tokens)
     request = {"gridpilot_api": cfg["base"] + "/tools/creao", "tool_token": token, **request}
     ENG.db.ex("insert into agent_runs values(?,?,?,?,?,?,?,?,?)", (local, "creao-cli", None, None, "specialist:" + kind, "creating_agent", time.time(), None,
               E.jd({"specialist": {"kind": kind, "name": name, "mission": meta.get("mission", kind), "trigger": meta.get("trigger", "operator")}, "requested_by": "operator", **meta, "request": {**request, "tool_token": "[redacted]"}})))
@@ -509,6 +601,225 @@ EXPLAIN_TEXT = ("Create a reusable personal agent named \"GRIDPILOT Finance Expl
     "sources (contract id, meter id, credit memo id, vendor master field, policy rule, person and date of each decision), say which source was trusted over which "
     "and why, and name what would change the decision. If the record does not support the decision, say so.\n\n"
     "Final answer: one JSON object {invoice_id, answer, sources: [ids], decision_supported: true|false}.")
+
+# ---------------------------------------------------------------- decision traces + agent summary
+def _st(s):
+    s = (s or "").lower()
+    if s in ("completed", "done", "approved", "executed", "monitoring", "closed", "verified", "resolved", "paid", "succeeded"): return "done"
+    if s in ("failed", "rolled_back", "denied", "error", "rejected", "validation_failed", "expired", "cancelled"): return "failed"
+    if s in ("superseded", "invalidated", "skipped"): return "skipped"
+    if s in ("pending", "running", "queued", "starting", "creating_agent", "awaiting_agent", "awaiting_approval", "code_issued", "planning", "in_progress", "scheduled", "validating", "dialing", "in-progress", "ringing"): return "active"
+    return "done"
+
+def _act_txt(a):
+    t = a.get("type") or a.get("action")
+    if t == "migrate_workload": return "migrate %s → %s" % (a.get("workload"), a.get("to_rack"))
+    if t == "set_gpu_power_limit": return "cap %s at %sW" % (a.get("rack"), a.get("watts"))
+    if t == "set_cooling_fan": return "%s fan %s%%" % (a.get("unit"), a.get("fan_pct"))
+    return str(t)
+
+def _norm_acts(acts):
+    return sorted(json.dumps({k: v for k, v in a.items() if k in ("type", "workload", "to_rack", "rack", "watts", "unit", "fan_pct")}, sort_keys=True) for a in (acts or []))
+
+def build_trace(kind, ident):
+    nodes, edges, spine = [], [], []
+    def node(nid, kind_, title, sub="", status="done", ts=None, actor="", metrics=None, detail="", row=0, col=None, tag=None):
+        nodes.append({"id": nid, "kind": kind_, "title": title, "sub": sub, "status": status, "ts": ts, "actor": actor, "metrics": metrics or {}, "detail": str(detail)[:1500], "row": row, "col": col, "tag": tag}); return nid
+    def chain(nid):
+        if spine: edges.append({"source": spine[-1], "target": nid, "kind": "flow"})
+        spine.append(nid); nodes[[n["id"] for n in nodes].index(nid)]["col"] = len(spine) - 1
+    if kind == "incident":
+        inc = incident_detail(ENG.incident(ident))
+        if not inc: return {"nodes": [], "edges": [], "title": "unknown incident"}
+        ev = inc.get("evidence") or {}
+        chain(node("obs", "signal", "Telemetry · %s" % inc["rack"], "GPU %s°C · inlet %s°C" % (ev.get("gpu_temp_c"), ev.get("inlet_temp_c")), ts=inc["created"], actor="digital twin", metrics={"rack": inc["rack"]}, detail=inc.get("probable_cause")))
+        tl = inc.get("timeline") or []
+        det = next((t for t in tl if t["state"] == "DETECTED"), None)
+        chain(node("det", "detector", "Anomaly detector", (det or {}).get("reason", ""), ts=(det or {}).get("ts"), actor="deterministic", metrics={"severity": inc.get("severity")}))
+        tcs = inc.get("tool_calls") or []
+        items = [("run", r["created"], r) for r in inc.get("agent_runs") or []] + [("plan", p["created"], p) for p in inc.get("plans") or []] + \
+                [("apr", a["created"], a) for a in inc.get("approvals") or []] + [("exec", x.get("created") or x.get("data", {}).get("created") or 0, x) for x in inc.get("executions") or []] + \
+                [("call", c["created"], c) for c in inc.get("calls") or []] + [("tl", t["ts"], t) for t in tl if t["state"] in ("ROLLING_BACK", "REPLAN", "DENIED", "ESCALATED", "RESOLVED", "CLOSED")]
+        items.sort(key=lambda x: x[1] or 0)
+        plans = inc.get("plans") or []
+        last_run = None
+        for typ, ts, o in items:
+            if typ == "run":
+                mine = [t for t in tcs if t.get("run_ref") == o["id"]]
+                counts = {}
+                for t in mine: counts[t["tool"]] = counts.get(t["tool"], 0) + 1
+                dur = (o.get("completed") or time.time()) - o["created"]
+                spec = o["task"].startswith("specialist:")
+                nid = node("run-" + o["id"], "specialist" if spec else "agent", ("CREAO · " + o["task"].replace("specialist:", "specialist: ").replace("_", " ")),
+                           "run %s · %ds" % ((o.get("provider_run_id") or o["id"])[:8], dur), _st(o["status"]), o["created"], "creao:" + (o.get("provider_run_id") or o["id"])[:8],
+                           {"tool calls": len(mine), **{k.replace("_", " "): v for k, v in sorted(counts.items(), key=lambda x: -x[1])[:5]}}, (o.get("data") or {}).get("error") or "")
+                chain(nid); last_run = o["id"]
+                evs = [t for t in mine if t["tool"] == "evaluate_plan" and isinstance(t.get("result"), dict) and t["result"].get("forecast")]
+                chosen = None
+                prop = next((t for t in mine if t["tool"] == "propose_plan"), None)
+                pacts = _norm_acts(((prop or {}).get("args") or {}).get("actions"))
+                for k_, t in enumerate(evs[:10]):
+                    r_ = t["result"]; f = r_.get("forecast", {}); fin = r_.get("finance", {}); pol = (r_.get("policy") or {}).get("decision")
+                    acts = r_.get("actions") or (t.get("args") or {}).get("actions") or []
+                    is_c = bool(pacts) and _norm_acts(acts) == pacts
+                    oid = node("opt-%s-%d" % (o["id"], k_), "option", " + ".join(_act_txt(a) for a in acts) or "do nothing", "option %d" % (k_ + 1), "done", t["ts"], "evaluate_plan",
+                               {"recovery": ("%ss" % f.get("recover_s")) if f.get("recover_s") is not None else "none", "end GPU": "%s°C" % f.get("final_gpu_c"), "cost": "$%.2f" % (fin.get("incremental_cost_usd") or 0), "policy": pol},
+                               row=1 + (k_ % 5), col=len(spine) - 1 + (k_ // 5) * 0.5, tag="chosen" if is_c else None)
+                    edges.append({"source": nid, "target": oid, "kind": "option"})
+                    if is_c: chosen = oid
+                if chosen: nodes[[n["id"] for n in nodes].index(nid)]["chosen_option"] = chosen
+            elif typ == "plan":
+                pol = (o.get("policy") or {}).get("decision")
+                nid = node("plan-%d" % o["version"], "plan", "%s v%d" % (o["plan_id"], o["version"]), " · ".join(_act_txt(a) for a in o.get("actions") or []), _st(o["status"]), o["created"], o.get("author", ""),
+                           {"policy": pol, "recovery": ("%ss" % o["forecast"].get("recover_s")) if o.get("forecast", {}).get("recover_s") is not None else "none", "cost": "$%.2f" % o.get("finance", {}).get("incremental_cost_usd", 0),
+                            "confidence": (o.get("meta") or {}).get("confidence")}, (o.get("meta") or {}).get("reasoning_summary", ""))
+                chain(nid)
+                runnode = next((n for n in nodes if n.get("chosen_option") and n["id"] == "run-" + str(last_run)), None)
+                if runnode: edges.append({"source": runnode["chosen_option"], "target": nid, "kind": "chosen"})
+            elif typ == "apr":
+                chain(node("apr-" + o["id"], "human", "Operator approval", "%s v%s · %s" % (o["plan_id"], o["plan_version"], o["status"]), _st(o["status"]), o["created"], "human", {"channel": (o.get("data") or {}).get("channel", "dashboard / voice code")}))
+            elif typ == "call":
+                chain(node("call-" + str(o["id"]), "voice", "Cartesia call", o["status"] + (" · " + o["data"].get("error") if o["data"].get("error") else ""), _st(o["status"]), o["created"], "cartesia", {}))
+            elif typ == "exec":
+                d = o.get("data") or {}
+                chain(node("exec-" + o["id"], "action", "Execute " + o["id"], ("commit " + (d.get("applied_sha") or "")[:10]) if d.get("applied_sha") else o["state"], _st(o["state"]), ts, "config executor",
+                           {"steps": len(d.get("steps") or []), "validation": "%d/%d ok" % (sum(1 for c in d.get("validation") or [] if c["ok"]), len(d.get("validation") or [])) if d.get("validation") else "—"}))
+            elif typ == "tl":
+                k2 = {"ROLLING_BACK": ("verify", "Rolled back", "failed"), "REPLAN": ("verify", "Replan", "failed"), "DENIED": ("verify", "Denied by policy", "failed"), "ESCALATED": ("human", "Escalated", "failed"),
+                      "RESOLVED": ("verify", "Recovered", "done"), "CLOSED": ("close", "Closed", "done")}[o["state"]]
+                chain(node("tl-%s-%d" % (o["state"], int(ts)), k2[0], k2[1], o.get("reason", ""), k2[2], ts, o.get("actor", "")))
+        if inc["state"] not in ("CLOSED",) and spine:
+            nodes[[n["id"] for n in nodes].index(spine[-1])]["current"] = True
+        return {"kind": kind, "id": ident, "title": "%s · %s" % (inc["id"], inc.get("title")), "state": inc["state"], "nodes": nodes, "edges": edges}
+    if kind == "wo":
+        wo = REL.get(ident)
+        if not wo: return {"nodes": [], "edges": [], "title": "unknown work order"}
+        p = wo.get("prediction") or {}
+        chain(node("sig", "signal", "%s · %s" % (wo["asset"], p.get("signal")), "%s %s (alarm %s)" % (p.get("value"), p.get("unit"), p.get("alarm")), ts=wo["created"], actor="digital twin sensors"))
+        chain(node("pred", "detector", "Failure predicted", "RUL %ss (90%%: %s–%s s)" % (p.get("rul_s"), p.get("rul_lo_s"), p.get("rul_hi_s")), ts=wo["created"], actor="predictor (deterministic)",
+                   metrics={"P(fail 15m)": p.get("p_fail_15m"), "model": (p.get("model") or "")[:28]}))
+        runs = {r["id"]: r for r in ENG.db.all("select * from agent_runs where id in (%s)" % ",".join("?" * len(wo.get("runs") or [])), tuple(wo.get("runs") or []))} if wo.get("runs") else {}
+        opts = wo.get("options") or []
+        for rid in wo.get("runs") or []:
+            r = runs.get(rid)
+            if not r: continue
+            n_t = ENG.db.one("select count(*) n from tool_calls where run_ref=?", (rid,))["n"]
+            dur = (r["completed"] or time.time()) - r["created"]
+            nid = node("run-" + rid, "agent", "CREAO · Reliability Agent", "run %s · %ds" % ((r["provider_run_id"] or rid)[:8], dur), _st(r["status"]), r["created"], "creao", {"tool calls": n_t})
+            chain(nid)
+            mine = [o for o in opts if o.get("ts", 0) >= r["created"] and (not r["completed"] or o.get("ts", 0) <= r["completed"] + 5)]
+            for k_, o in enumerate(mine[:10]):
+                oid = node("opt-%s-%d" % (rid, k_), "option", " + ".join(_act_txt(a) for a in o["actions"]) or "do nothing", "option %d" % (k_ + 1), "done", o.get("ts"), "rel_evaluate",
+                           {"peak": "%s°C" % o.get("peak"), "if nothing": "%s°C" % o.get("cf_peak"), "cost": "$%.2f" % (o.get("incremental_cost_usd") or 0), "meets goal": "yes" if o.get("meets_goal") else "no"},
+                           row=1 + (k_ % 5), col=len(spine) - 1 + (k_ // 5) * 0.5, tag="chosen" if wo["plans"] and _norm_acts(o["actions"]) == _norm_acts(wo["plans"][-1]["actions"]) else None)
+                edges.append({"source": nid, "target": oid, "kind": "option"})
+        for pl in wo.get("plans") or []:
+            ev = pl["evaluation"]
+            nid = node("plan-%d" % pl["version"], "plan", "Preventive plan v%d" % pl["version"], " · ".join(_act_txt(a) for a in pl["actions"]) or "no mitigation", _st(pl["status"]), pl["created"], pl["author"],
+                       {"peak": "%s°C" % ev["with_plan"]["peak_gpu_c"], "if nothing": "%s°C" % ev["counterfactual"]["peak_gpu_c"], "policy": ev["policy"]["decision"], "window": "t+%ss" % pl["maintenance_start_in_s"]}, pl.get("reasoning_summary", ""))
+            chain(nid)
+            ch = next((n for n in nodes if n.get("tag") == "chosen" and n["kind"] == "option"), None)
+            if ch: edges.append({"source": ch["id"], "target": nid, "kind": "chosen"})
+        tlmap = {t["state"]: t for t in wo.get("timeline") or []}
+        for stt, kd, title in (("APPROVED", "human", "Operator approval"), ("SCHEDULED", "action", "Mitigations committed"), ("IN_MAINTENANCE", "action", "Maintenance window"), ("VERIFIED", "verify", "Verified"), ("CLOSED", "close", "Closed"), ("REJECTED", "human", "Rejected"), ("FAILED", "verify", "Asset failed")):
+            t = tlmap.get(stt)
+            if t: chain(node("wo-" + stt, kd, title, t.get("reason", ""), "failed" if stt in ("REJECTED", "FAILED") else "done", t["ts"], t.get("actor", ""),
+                            ({"observed peak": "%s°C" % wo["outcome"]["observed_peak_gpu_c"], "if nothing": "%s°C" % wo["outcome"]["counterfactual_peak_gpu_c"], "prevented": "yes" if wo["outcome"]["prevented"] else "no"} if stt == "VERIFIED" and wo.get("outcome") else {})))
+        if wo["state"] == "AWAITING_APPROVAL": chain(node("wo-wait", "human", "Awaiting operator", "approve or reject plan v%d" % len(wo["plans"]), "active", time.time(), "human"))
+        if wo["state"] not in ("CLOSED", "REJECTED", "FAILED") and spine: nodes[[n["id"] for n in nodes].index(spine[-1])]["current"] = True
+        return {"kind": kind, "id": ident, "title": "%s · %s %s" % (wo["id"], wo["asset"], wo.get("failure_mode")), "state": wo["state"], "nodes": nodes, "edges": edges}
+    if kind == "finance":
+        r = ENG.db.one("select * from agent_runs where id=?", (ident,))
+        if not r: return {"nodes": [], "edges": [], "title": "unknown run"}
+        d = json.loads(r["data"] or "{}"); actor = "creao:" + (r["provider_run_id"] or r["id"])
+        if r["task"] == "specialist:finance_explainer":
+            chain(node("q", "human", "Question on " + str(d.get("invoice_id")), d.get("question", ""), "done", r["created"], "operator"))
+            n_t = ENG.db.one("select count(*) n from tool_calls where run_ref=?", (ident,))["n"]
+            chain(node("run", "agent", "CREAO · Finance Explainer", "run %s" % (r["provider_run_id"] or ident)[:8], _st(r["status"]), r["created"], actor, {"tool calls": n_t}))
+            ex = ENG.db.one("select reason, ts from ap_decisions where invoice_id=? and kind='explanation' and actor=? order by id desc", (d.get("invoice_id"), actor))
+            if ex: chain(node("ans", "verify", "Answer with sources", ex["reason"][:160], "done", ex["ts"], actor, detail=ex["reason"]))
+            return {"kind": kind, "id": ident, "title": "Explain " + str(d.get("invoice_id")), "state": r["status"], "nodes": nodes, "edges": edges}
+        n_inv = ENG.db.one("select count(*) n from ap_invoices")["n"]
+        chain(node("inbox", "signal", "Invoice inbox", "%d invoices · contract × meter × vendor master" % n_inv, "done", r["created"], "AP subledger"))
+        det = ENG.db.all("select invoice_id, decision from ap_decisions where kind='recommendation' and ts <= ? order by id", (r["created"] + 5,))
+        chain(node("match", "detector", "Three-way matcher", "%d deterministic decisions" % len(det), "done", r["created"], "deterministic", {d_: sum(1 for x in det if x["decision"] == d_) for d_ in ("approve", "short_pay", "dispute", "hold") if any(x["decision"] == d_ for x in det)}))
+        n_t = ENG.db.one("select count(*) n from tool_calls where run_ref=?", (ident,))["n"]
+        nid = node("run", "agent", "CREAO · AP Analyst", "run %s" % (r["provider_run_id"] or ident)[:8], _st(r["status"]), r["created"], actor, {"tool calls": n_t}); chain(nid)
+        recs = ENG.db.all("select invoice_id, decision, amount, reason, ts from ap_decisions where actor=? and kind='agent_recommendation' order by id", (actor,))
+        agree = 0
+        for k_, x in enumerate(recs[:10]):
+            a = DESK.analyze(x["invoice_id"]); ok = a["decision"] == x["decision"] and abs(a["amount"] - x["amount"]) < 0.01; agree += ok
+            node("rec-%d" % k_, "option", "%s · %s $%.2f" % (x["invoice_id"], x["decision"], x["amount"]), "agrees with matcher" if ok else "differs: matcher %s $%.2f" % (a["decision"], a["amount"]), "done" if ok else "failed", x["ts"], actor, row=1 + (k_ % 5), col=len(spine) - 1 + (k_ // 5) * 0.5, detail=x["reason"])
+            edges.append({"source": nid, "target": "rec-%d" % k_, "kind": "option"})
+        ctl = ENG.db.all("select count(*) n, decision from ap_decisions where kind='controller' group by decision")
+        chain(node("ctl", "human", "Controller sign-off", ", ".join("%s %d" % (c["decision"], c["n"]) for c in ctl) or "pending", "done" if ctl else "active", None, "human controller", {"agreement": "%d/%d" % (agree, len(recs))}))
+        paid = ENG.db.one("select count(*) n from bank_feed where date >= ?", (time.strftime("%Y-%m-%d"),))["n"]
+        if paid: chain(node("pay", "action", "Payment run", "%d payments today" % paid, "done", None, "treasury"))
+        return {"kind": kind, "id": ident, "title": "AP review " + ident, "state": r["status"], "nodes": nodes, "edges": edges}
+    return {"nodes": [], "edges": [], "title": "unknown"}
+
+def loops():
+    out = []
+    for r in ENG.db.all("select id, state, rack, created from incidents order by created desc limit 6"):
+        out.append({"kind": "incident", "id": r["id"], "title": "%s · thermal %s" % (r["id"], r["rack"]), "state": r["state"], "ts": r["created"], "active": r["state"] != "CLOSED", "loop": "Remediation"})
+    for r in ENG.db.all("select id, asset, state, created from work_orders order by created desc limit 6"):
+        out.append({"kind": "wo", "id": r["id"], "title": "%s · %s predictive" % (r["id"], r["asset"]), "state": r["state"], "ts": r["created"], "active": r["state"] not in ("CLOSED", "REJECTED", "FAILED"), "loop": "Reliability"})
+    for r in ENG.db.all("select id, task, status, created from agent_runs where task in ('specialist:ap_analyst','specialist:finance_explainer') order by created desc limit 6"):
+        out.append({"kind": "finance", "id": r["id"], "title": ("AP review " if r["task"].endswith("ap_analyst") else "Explain · ") + r["id"], "state": r["status"], "ts": r["created"], "active": _st(r["status"]) == "active", "loop": "Finance"})
+    return sorted(out, key=lambda x: -x["ts"])
+
+def agent_summary():
+    db = ENG.db; now_ = time.time()
+    runs = db.all("select task, status, created, completed, incident_id from agent_runs where provider='creao-cli'")
+    tc = db.one("select count(*) n, sum(ok) k from tool_calls")
+    incs = db.all("select id, state, created from incidents")
+    ttp = []
+    for i in incs:
+        tl = db.one("select min(ts) t from events where incident_id=? and type='state_transition' and json_extract(data,'$.to')='PLAN_PROPOSED'", (i["id"],))
+        if tl and tl["t"]: ttp.append(tl["t"] - i["created"])
+    ev = lambda typ: db.one("select count(*) n from events where type=?", (typ,))["n"]
+    auto_exec = db.one("select count(*) n from events where type='state_transition' and json_extract(data,'$.from')='POLICY_CHECKED' and json_extract(data,'$.to')='EXECUTING'")["n"]
+    human_ok = db.one("select count(*) n from approvals where status='approved'")["n"] + db.one("select count(*) n from work_orders where data like '%\"approved_by\"%'")["n"]
+    ctl = db.one("select count(*) n from ap_decisions where kind='controller'")["n"]
+    agent_inv = db.one("select count(*) n from ap_decisions where actor='agent:ap' and decision='approve' and kind='approval'")["n"] if True else 0
+    denied = db.one("select count(*) n from events where type='state_transition' and json_extract(data,'$.to')='DENIED'")["n"] + ev("agent_tool_refused")
+    recs = db.all("select invoice_id, decision, amount from ap_decisions where kind='agent_recommendation'")
+    agree = 0
+    for x in recs:
+        try: a = DESK.analyze(x["invoice_id"]); agree += (a["decision"] == x["decision"] and abs(a["amount"] - x["amount"]) < 0.01)
+        except Exception: pass
+    pf = PRED.proof()
+    specs = db.all("select key, kind, name, status, created from specialists")
+    def last(task_like):
+        r = db.one("select status, created from agent_runs where task like ? order by created desc limit 1", (task_like,)); return r
+    roster = []
+    def add(name, kind_, role, status, last_ts=None, count=None, loop=None):
+        roster.append({"name": name, "kind": kind_, "role": role, "status": status, "last": last_ts, "count": count, "loop": loop})
+    cfg_ok = bool(ENG._cli_ok)
+    for nm, like, role, loop in (("Remediation Agent", "diagnose_and_plan", "diagnose, plan, replan, summaries", "Remediation"), ("Reliability Agent", "specialist:reliability", "predictive maintenance plans", "Reliability"),
+                                 ("AP Analyst", "specialist:ap_analyst", "invoice review, disputes", "Finance"), ("Finance Explainer", "specialist:finance_explainer", "defends decisions with sources", "Finance")):
+        l = last(like) if like != "diagnose_and_plan" else db.one("select status, created from agent_runs where provider='creao-cli' and task in ('diagnose_and_plan','replan_after_failure','evaluate_alternative','execute_approved_plan','post_incident_summary') order by created desc limit 1")
+        n = db.one("select count(*) n from agent_runs where task like ?", (like if like != "diagnose_and_plan" else "%plan%",))["n"]
+        add(nm, "CREAO", role, (l["status"] if l else ("ready" if cfg_ok else "not connected")), l and l["created"], n, loop)
+    nsp = [s for s in specs if s["kind"] in ("thermal_forensics", "capacity_planner", "finops_auditor", "sla_guardian")]
+    add("Specialists (%d)" % len(nsp), "CREAO", "created on demand: " + ", ".join(sorted(set(s["kind"].replace("_", " ") for s in nsp)))[:80], "ready" if nsp else "on demand", None, db.one("select count(*) n from agent_runs where task like 'specialist:%' and task not in ('specialist:ap_analyst','specialist:finance_explainer','specialist:reliability')")["n"], "Remediation")
+    calls = db.one("select status, created from calls order by created desc limit 1")
+    opok = bool((ENG.db.get("operator") or {}).get("consent"))
+    add("Voice Operator", "Cartesia", "explains, takes alternatives, approval intent", (calls["status"] if calls and calls["created"] > now_ - 900 else ("ready" if opok else "needs operator")), calls and calls["created"], db.one("select count(*) n from calls")["n"], "Human")
+    add("Failure predictor", "deterministic", "RUL from sensor trends, 10 assets", "watching", now_, pf["predictions_scored"], "Reliability")
+    add("Energy agent", "deterministic", "BESS peak shaving within policy", TWIN.bess["mode"].replace("_", " "), now_, ev("bess_dispatch"), "Energy")
+    add("Security watcher", "deterministic", "access + firmware anomalies → human", "alert" if any(e["severity"] == "high" for e in TWIN.security[-3:]) else "watching", now_, ev("security_alert"), "Security")
+    add("Policy engine", "deterministic", "auto / approval / forbidden", "enforcing", now_, None, "All")
+    add("Config executor", "deterministic", "git commits, validation, rollback", "idle", None, db.one("select count(*) n from executions")["n"], "Remediation")
+    return {"kpis": {"creao_runs": len(runs), "creao_completed": sum(1 for r in runs if r["status"] == "completed"), "creao_failed": sum(1 for r in runs if r["status"] in ("failed", "cancelled")),
+                     "creao_active": sum(1 for r in runs if _st(r["status"]) == "active"), "agents_ready": sum(1 for s in specs if s["status"] == "ready"),
+                     "tool_calls": tc["n"] or 0, "tool_ok_pct": round(100 * (tc["k"] or 0) / tc["n"], 1) if tc["n"] else None,
+                     "auto_executed": auto_exec, "human_approved": human_ok, "controller_signoffs": ctl, "policy_blocks": denied, "rollbacks": ev("rollback_completed") or db.one("select count(*) n from executions where state='rolled_back'")["n"],
+                     "mean_time_to_plan_s": round(sum(ttp) / len(ttp)) if ttp else None, "incidents": len(incs),
+                     "failures_predicted": db.one("select count(*) n from work_orders")["n"], "prevented": db.one("select count(*) n from work_orders where data like '%\"prevented\": true%'")["n"],
+                     "mean_lead_time_s": pf["mean_lead_time_s"], "rul_mae_s": pf["rul_mae_s"],
+                     "agent_finance_agreement": "%d/%d" % (agree, len(recs)), "bess_saved_usd": round(TWIN.bess["saved_usd"], 2), "bess_dispatches": ev("bess_dispatch"), "security_alerts": ev("security_alert")},
+            "roster": roster}
 
 # ---------------------------------------------------------------- CREAO tools
 MANIFEST = {
@@ -654,7 +965,9 @@ async def creao_tool(req):
     run = ENG.db.one("select provider_run_id from agent_runs where id=?", (tok["run_ref"],))
     actor = "creao:%s" % ((run or {}).get("provider_run_id") or tok["run_ref"])
     ok = 1
-    try: res = await tool_dispatch(tool, args, tok["incident_id"], actor, "creao")
+    try:
+        if tok.get("task") == "reliability": res = await REL.tool(tool, args, tok.get("work_order"), actor)
+        else: res = await tool_dispatch(tool, args, tok["incident_id"], actor, "creao")
     except web.HTTPException: raise
     except Exception as e: ok = 0; res = {"error": str(e)[:500]}
     ENG.db.ex("insert into tool_calls(ts,provider,run_ref,incident_id,tool,args,result,ok) values(?,?,?,?,?,?,?,?)",

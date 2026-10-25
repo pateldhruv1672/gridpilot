@@ -447,6 +447,9 @@ class Engine:
             extra["recommendations"] = n
         self.db.ex("update agent_runs set data=? where id=?", (jd(data), r["id"]))
         self.event(r["incident_id"], "specialist_completed", actor, {"run_ref": r["id"], "status": st, "has_recommendation": bool(data.get("evaluation")) or bool(extra.get("recommendations")) or bool(extra.get("explained")), **extra})
+        for h in getattr(self, "hooks", []):
+            try: h(r, st, data)
+            except Exception: traceback.print_exc()
         await self._follow_up(r, data)
 
     async def _follow_up(self, r, data):
