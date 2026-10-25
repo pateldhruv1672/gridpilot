@@ -304,6 +304,82 @@ async def api_reasoning(req):
         runs.append({**r, "agent": r["task"].replace("specialist:", "").replace("_", " "), "calls": sum(1 for c in out if c["run_ref"] == r["id"]), "last_call_ts": last["ts"] if last else None})
     return jresp({"runs": runs, "calls": out[::-1], "now": time.time()})
 
+@routes.get("/api/approvals")
+async def api_approvals(req):
+    viewer(req); out = []; now_ = time.time()
+    for r in ENG.db.all("select id from incidents where state='AWAITING_APPROVAL' order by created desc"):
+        inc = incident_detail(ENG.incident(r["id"])); plan = (inc.get("plans") or [None])[-1]
+        apr = (inc.get("approvals") or [None])[-1]
+        if not plan: continue
+        rules = [x.get("rule") for x in (plan["policy"].get("plan_rules") or []) + (plan["policy"].get("actions") or []) if x.get("decision") != "AUTO_ALLOWED" and x.get("rule")]
+        out.append({"kind": "incident", "id": inc["id"], "loop": "Remediation", "title": "%s v%d · %s" % (plan["plan_id"], plan["version"], inc["rack"]), "what": [STY.act_txt(a) for a in plan["actions"]],
+                    "why_human": list(dict.fromkeys(rules)) or ["policy requires human approval"], "proposed_by": plan.get("author"), "evidence": {"forecast recovery": ("%ss" % plan["forecast"]["recover_s"]) if plan["forecast"].get("recover_s") is not None else "none in 10 min", "cost": plan["finance"].get("incremental_cost_usd"), "SLA exposure avoided": (plan["baseline"].get("sla_exposure_usd") or 0) - (plan["finance"].get("sla_exposure_usd") or 0)},
+                    "reasoning": (plan.get("meta") or {}).get("reasoning_summary"), "approval": apr and {"id": apr["id"], "status": apr["status"], "expires": apr["expires"], "expired": now_ > apr["expires"] or apr["status"] == "expired"},
+                    "plan_id": plan["plan_id"], "plan_version": plan["version"], "channels": ["console", "voice code (Cartesia call)"],
+                    "after": "backend re-checks plan version and live telemetry, commits the change to git, validates, monitors recovery, rolls back on failure"})
+    for w in REL.list(10):
+        if w["state"] != "AWAITING_APPROVAL" or not w.get("plans"): continue
+        pl = w["plans"][-1]; ev = pl["evaluation"]
+        out.append({"kind": "wo", "id": w["id"], "loop": "Reliability", "title": "%s · %s %s" % (w["id"], w["asset"], w.get("failure_mode")), "what": [STY.act_txt(a) for a in pl["actions"]] + ["take %s out for repair at t+%ss for %ss" % (w["asset"], pl["maintenance_start_in_s"], pl["maintenance_duration_s"])],
+                    "why_human": ["taking a cooling unit out of service is a maintenance work order (policy: APPROVAL_REQUIRED)"], "proposed_by": pl.get("author"), "evidence": {"peak with plan": "%s°C" % ev["with_plan"]["peak_gpu_c"], "peak if nothing": "%s°C" % ev["counterfactual"]["peak_gpu_c"], "cost": ev.get("incremental_cost_usd")},
+                    "reasoning": pl.get("reasoning_summary"), "approval": {"status": "pending", "deadline_hint": "before predicted failure at t+%ss" % int(w.get("predicted_fail_sim_t") or 0)}, "plan_version": pl["version"], "channels": ["console"],
+                    "after": "mitigations committed to git, maintenance window scheduled in the twin, outcome verified against the do-nothing forecast"})
+    for gr in GHOST.runs(4):
+        for p in gr["data"].get("proposals", []):
+            if p.get("status") == "proposed":
+                out.append({"kind": "ghost", "id": p["pid"], "loop": "Ghost v2", "title": "%s: %s" % (p["kind"], p["name"]), "what": [p.get("mission") or p.get("change") or "%s %s %s" % (p.get("metric"), p.get("op"), p.get("threshold"))],
+                            "why_human": ["new agents, schedulers and detectors change the system itself; only the operator can dispatch them"], "proposed_by": "Mana Ghost Architect", "reasoning": p.get("rationale"), "evidence": {"expected value": p.get("expected_value"), "risk": p.get("risk")}, "channels": ["console"], "approval": {"status": "pending"}})
+    for inv in DESK.snapshot()["invoices"]:
+        if inv["status"] == "awaiting_controller":
+            out.append({"kind": "invoice", "id": inv["id"], "loop": "Finance", "title": "%s · %s %s" % (inv["id"], inv.get("vendor_name") or inv.get("vendor"), fmt_money(inv.get("amount") or inv.get("total") or 0)), "what": ["controller sign-off before payment"],
+                        "why_human": ["payments above the auto-approve limit need a controller (segregation of duties)"], "proposed_by": "AP matcher + CREAO AP Analyst", "reasoning": inv.get("reason") or inv.get("decision_reason"), "evidence": {}, "channels": ["Finance desk"], "approval": {"status": "pending"}})
+    return jresp({"items": out, "auto_call": ENG.db.get("auto_call", True), "flow": ["agent proposes (never approves)", "policy engine: auto-allowed / approval required / forbidden", "human approves the exact plan version (console click or spoken one-time code on a Cartesia call)", "backend re-verifies version, window and live state", "git commit + apply", "validate and monitor, roll back on failure", "audit log"]})
+
+def fmt_money(v):
+    try: return "$%s" % format(float(v), ",.2f")
+    except Exception: return str(v)
+
+@routes.post("/api/voice/setup")
+async def api_voice_setup(req):
+    owner_only(req); import voice as VO
+    try: await asyncio.to_thread(VO.ensure_setup, ENG); return jresp({"ok": True, "message": "Cartesia voice agent and tools re-registered against the current backend URL"})
+    except Exception as e: return jresp({"ok": False, "message": str(e)[:300]}, 502)
+
+@routes.get("/api/voice/check")
+async def api_voice_check(req):
+    owner_only(req); import voice as VO
+    checks = []; keys = IX.keys() if hasattr(IX, "keys") else {}
+    has_key = bool(os.environ.get("CARTESIA_API_KEY") or (ENG.db.get("cartesia_api_key")) or getattr(IX, "CARTESIA_KEY", None))
+    try:
+        ag = await asyncio.to_thread(VO.cart, "GET", "/agents/" + str(ENG.db.get("cartesia_agent_id")))
+        checks.append({"name": "Cartesia API key and voice agent", "ok": True, "detail": "%s (%s)" % (ag.get("name") or "agent", ENG.db.get("cartesia_agent_id"))})
+    except Exception as e: checks.append({"name": "Cartesia API key and voice agent", "ok": False, "detail": str(e)[:200]})
+    try:
+        nums = await asyncio.to_thread(VO.cart, "GET", "/agents/phone-numbers")
+        lst = nums.get("data") or nums.get("phone_numbers") or (nums if isinstance(nums, list) else [])
+        mine = next((n for n in lst if n.get("id") == ENG.db.get("cartesia_from_number_id")), None)
+        checks.append({"name": "Outbound phone number", "ok": bool(mine), "detail": (mine or {}).get("number") or (mine or {}).get("phone_number") or ("number id %s not found" % ENG.db.get("cartesia_from_number_id"))})
+    except Exception as e: checks.append({"name": "Outbound phone number", "ok": bool(ENG.db.get("cartesia_from_number_id")), "detail": "id %s (list call: %s)" % (ENG.db.get("cartesia_from_number_id"), str(e)[:120])})
+    op = ENG.db.get("operator") or {}
+    checks.append({"name": "Operator registered with consent", "ok": bool(op.get("phone") and op.get("consent")), "detail": ("%s · •••%s · consent %s" % (op.get("name"), str(op.get("phone"))[-4:], time.strftime("%H:%M", time.localtime(op.get("consent_at") or 0)))) if op.get("phone") else "register in Connections"})
+    base_ok = ENG.db.get("cartesia_setup_base") == ENG.public_base
+    checks.append({"name": "Voice tools point at this backend", "ok": base_ok, "detail": "current" if base_ok else "will be re-registered automatically on the next call (ingress URL changed)"})
+    try:
+        import urllib.request as _ur
+        code_ = await asyncio.to_thread(lambda: _ur.urlopen(ENG.public_base + "/health", timeout=8).status)
+        checks.append({"name": "Public tool URL reachable", "ok": code_ == 200, "detail": "HTTP %s" % code_})
+    except Exception as e: checks.append({"name": "Public tool URL reachable", "ok": False, "detail": str(e)[:120]})
+    checks.append({"name": "Auto-call when a plan needs approval", "ok": bool(ENG.db.get("auto_call", True)), "detail": "on" if ENG.db.get("auto_call", True) else "off: use Call operator"})
+    calls = []
+    for cr in ENG.db.all("select * from calls order by created desc limit 6"):
+        d = json.loads(cr["data"] or "{}"); pc = d.get("provider_call") or {}
+        tr = pc.get("transcript") or pc.get("messages") or pc.get("turns") or []
+        calls.append({"id": cr["id"], "incident_id": cr["incident_id"], "created": cr["created"], "status": cr["status"], "error": d.get("error") or (d.get("provider") or {}).get("error") if isinstance(d.get("provider"), dict) else d.get("error"),
+                      "duration_s": pc.get("duration_seconds") or pc.get("duration"), "turns": len(tr) if isinstance(tr, list) else 0, "agent_call_id": d.get("agent_call_id")})
+    tools_used = ENG.db.all("select ts, substr(data,1,160) d from events where type='voice_tool_call' order by id desc limit 5")
+    return jresp({"checks": checks, "ready": all(c["ok"] for c in checks[:5]), "calls": calls, "voice_tool_calls": tools_used,
+                  "how_to_test": "Open an incident (Scenarios → Cooling failure), wait for the plan to reach Awaiting approval, then press Call me about this. Your phone rings from the outbound number; the agent reads the plan and asks for the 6-digit code shown on screen. Saying the code approves exactly that plan version."})
+
 @routes.get("/api/ghost/digest")
 async def api_ghost_digest(req): owner_only(req); return jresp(GHOST.digest())
 

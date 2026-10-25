@@ -463,9 +463,12 @@ function IncidentPanel({ g, setModal, toast }) {
       <div className="mt-2" style={{ font: '10.5px/1.5 ' + SANS, color: C.mute }}>{plan.policy.plan_rules.concat(plan.policy.actions).filter(r => r.decision !== 'AUTO_ALLOWED').map(r => r.rule).join(' · ')}</div>
       {plan.meta && plan.meta.reasoning_summary && <div className="mt-2 p-2.5 rounded" style={{ background: 'rgba(67,217,245,.05)', border: '1px solid rgba(67,217,245,.18)', font: '11.5px/1.5 ' + SANS, color: '#c7d6e6' }}><Label color={C.cyan}>CREAO reasoning</Label><div className="mt-1">{plan.meta.reasoning_summary}</div>{plan.meta.confidence != null && <div style={{ font: '10px ' + MONO, color: C.mute, marginTop: 4 }}>confidence {plan.meta.confidence}</div>}</div>}
       {code && code.code && <div className="mt-3 p-3 rounded text-center" style={{ background: 'rgba(79,224,165,.07)', border: '1px solid rgba(79,224,165,.4)' }}><Label color={C.mint}>Voice approval code · {code.plan_id} v{code.plan_version}</Label><div style={{ font: '600 28px ' + MONO, letterSpacing: '0.3em', color: C.mint, marginTop: 4 }}>{code.code}</div><div style={{ font: '10.5px ' + SANS, color: C.mute }}>Read this to the GRIDPILOT voice agent to authorize this exact plan version.</div></div>}
+      {inc.state === 'AWAITING_APPROVAL' && apr && <div className="mt-3 flex items-center gap-2 flex-wrap px-2.5 py-2 rounded" style={{ background: 'rgba(255,187,85,.06)', border: '1px solid rgba(255,187,85,.3)', font: '10.5px ' + MONO, color: C.mute }}>
+        <span style={{ color: C.amber, fontWeight: 600 }}>Needs your approval</span><span>· {plan.policy.plan_rules.concat(plan.policy.actions).filter(r => r.decision !== 'AUTO_ALLOWED').map(r => r.rule).filter((x, i, a) => a.indexOf(x) === i).join(' · ') || 'policy'}</span>
+        <span className="ml-auto">window <Countdown until={apr.expires} /></span><button onClick={() => setModal({ kind: 'approvals' })} style={{ color: C.cyan, fontWeight: 600 }}>How approval works →</button></div>}
       <div className="flex flex-wrap gap-2 mt-3">
         <Btn onClick={() => setModal({ kind: 'diff' })}>View Diff</Btn>
-        <Btn tone="mint" disabled={inc.state !== 'AWAITING_APPROVAL' || !!busy} onClick={() => run('approve', () => g.api('/api/incidents/' + inc.id + '/approve', 'POST', { plan_id: plan.plan_id, plan_version: plan.version }))}>Approve v{plan.version}</Btn>
+        <Btn tone="mint" disabled={inc.state !== 'AWAITING_APPROVAL' || !!busy} onClick={() => run('approve', () => approveIncident(g, inc.id, plan.plan_id, plan.version))}>{apr && (apr.status === 'expired' || apr.expires < Date.now() / 1000) && inc.state === 'AWAITING_APPROVAL' ? 'Re-check & approve v' + plan.version : 'Approve v' + plan.version}</Btn>
         <Btn tone="danger" disabled={inc.state !== 'AWAITING_APPROVAL' || !!busy} onClick={() => setModal({ kind: 'reject' })}>Reject</Btn>
         <Btn disabled={!!busy || g.state.incident.state === 'CLOSED'} onClick={() => run('call', () => g.api('/api/incidents/' + inc.id + '/call', 'POST', {}))}>Call Operator</Btn>
         {inc.state === 'APPROVED' && <Btn tone="primary" disabled={!!busy} title="Normally CREAO initiates execution after approval; this lets the verified operator trigger it" onClick={() => run('exec', () => g.api('/api/incidents/' + inc.id + '/execute', 'POST', { plan_id: plan.plan_id, plan_version: plan.version }))}>Execute now</Btn>}
@@ -736,6 +739,7 @@ function GpuFleet({ g, narrow }) {
       <Kpi label="Stranded idle GPUs" value={s.stranded_idle_on_hot_racks} sub="idle on racks above 78°C" />
     </div>
     <div className="grid gap-3 p-3 flex-1 min-h-0" style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(0, 1.5fr) minmax(320px, 1fr)' }}>
+      <div style={{ gridColumn: narrow ? undefined : 'span 2' }}><LoadDistribution g={g} /></div>
       <Panel style={{ padding: 12 }}>
         <div className="flex items-center gap-2 flex-wrap mb-2"><Label color={C.cyan}>GPU fleet · 64 racks × 8 GPUs</Label>
           <div className="ml-auto flex gap-1">{GPU_METRICS.map(([k, l]) => <button key={k} onClick={() => setMetric(k)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '3px 10px', color: metric === k ? C.text : C.mute, background: metric === k ? 'rgba(67,217,245,.12)' : 'transparent', border: '1px solid ' + (metric === k ? 'rgba(67,217,245,.4)' : C.line) }}>{l}</button>)}</div></div>
@@ -971,6 +975,116 @@ function ScenariosTab({ g, toast, narrow, openTrace }) {
       <div className="flex-1 min-h-0 overflow-auto"><LiveReasoning g={g} /></div>
     </Panel>
   </div>;
+}
+
+async function approveIncident(g, incId, planId, version) {
+  try { return await g.api('/api/incidents/' + incId + '/approve', 'POST', { plan_id: planId, plan_version: version }); }
+  catch (e) {
+    if (!/expired|no pending approval/i.test(e.message)) throw e;
+    const r = await g.api('/api/incidents/' + incId + '/renew-approval', 'POST', {});
+    if (!r.ok) throw new Error('Window had expired and the re-check failed: ' + r.message);
+    const a = await g.api('/api/incidents/' + incId + '/approve', 'POST', { plan_id: planId, plan_version: version });
+    return { ...a, message: 'The 15-minute window had expired. The plan was re-checked on live telemetry, a new window opened, and your approval was recorded. ' + (a.message || '') };
+  }
+}
+function useApprovals(g) {
+  const [d, setD] = React.useState(null);
+  React.useEffect(() => { if (!g.url) return; let dead = false; const load = () => g.api('/api/approvals').then(r => { if (!dead) setD(r); }).catch(() => { }); load(); const t = setInterval(load, 4000); return () => { dead = true; clearInterval(t); }; }, [g.url]);
+  return d;
+}
+function Countdown({ until }) {
+  const [, setT] = React.useState(0); React.useEffect(() => { const t = setInterval(() => setT(x => x + 1), 1000); return () => clearInterval(t); }, []);
+  const left = until - Date.now() / 1000;
+  return left > 0 ? <span style={{ color: left < 120 ? C.amber : C.mint }}>{Math.floor(left / 60)}:{String(Math.floor(left % 60)).padStart(2, '0')} left</span> : <span style={{ color: C.red }}>expired {Math.round(-left / 60)} min ago</span>;
+}
+function ApprovalCenter({ g, toast, data, setTab, onClose }) {
+  const [busy, setBusy] = React.useState(null); const [vc, setVc] = React.useState(null); const owner = userId === ownerId;
+  const loadVc = () => g.api('/api/voice/check').then(setVc).catch(e => setVc({ error: e.message }));
+  React.useEffect(() => { if (owner) loadVc(); }, []);
+  const run = async (key, fn) => { setBusy(key); try { const r = await fn(); toast((r && r.message) || 'done', r && r.ok === false ? 'err' : 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(null); };
+  const items = (data && data.items) || [];
+  const LC = { Remediation: C.red, Reliability: C.mint, 'Ghost v2': '#b49cff', Finance: C.amber };
+  return <div className="flex flex-col gap-4">
+    <div><Label color={C.cyan}>How approval works</Label>
+      <div className="flex flex-wrap items-center gap-1.5 mt-2">{((data && data.flow) || []).map((f, i, a) => <React.Fragment key={i}><span style={{ font: '11px/1.35 ' + SANS, padding: '5px 9px', borderRadius: 8, background: i === 2 ? 'rgba(255,187,85,.1)' : C.p1, border: '1px solid ' + (i === 2 ? 'rgba(255,187,85,.45)' : C.line), color: i === 2 ? '#ffd9a0' : C.text, maxWidth: 230 }}><b style={{ font: '600 9px ' + MONO, color: C.dim, marginRight: 5 }}>{i + 1}</b>{f}</span>{i < a.length - 1 && <span style={{ color: C.dim }}>→</span>}</React.Fragment>)}</div>
+      <div style={{ font: '11px/1.55 ' + SANS, color: C.mute, marginTop: 6 }}>Agents can only propose. The policy engine decides what may run alone (for example a fan change) and what needs you (moving customer workloads, spending more than $100, taking cooling out of service). An approval is tied to one exact plan version and expires after 15 minutes; if the agent replans, you approve the new version. If a window lapses, Approve re-checks the same plan on live telemetry first and only then records your decision.</div></div>
+    <div><div className="flex items-baseline gap-2"><Label color={C.amber}>Waiting for you</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>{items.length} decision{items.length === 1 ? '' : 's'}</span></div>
+      {items.length === 0 && <div style={{ font: '11.5px ' + SANS, color: C.mute, marginTop: 6 }}>Nothing pending. Run a scenario to create decisions.</div>}
+      <div className="flex flex-col gap-2 mt-2">{items.map(it => <div key={it.kind + it.id} className="p-3 rounded-lg" style={{ background: C.p1, border: '1px solid ' + C.line, borderLeft: '3px solid ' + (LC[it.loop] || C.cyan) }}>
+        <div className="flex items-center gap-2 flex-wrap"><span style={{ font: '600 9px ' + MONO, letterSpacing: '.12em', color: LC[it.loop] || C.cyan }}>{it.loop.toUpperCase()}</span><span style={{ font: '600 12.5px ' + SANS, color: C.text }}>{it.title}</span>
+          {it.approval && it.approval.expires && <span className="ml-auto" style={{ font: '10.5px ' + MONO }}>window <Countdown until={it.approval.expires} /></span>}
+          {it.approval && it.approval.deadline_hint && <span className="ml-auto" style={{ font: '10.5px ' + MONO, color: C.amber }}>{it.approval.deadline_hint}</span>}</div>
+        <div className="grid gap-3 mt-2" style={{ gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)' }}>
+          <div><Label>What you are approving</Label>{it.what.map((w, i) => <div key={i} style={{ font: '11.5px/1.5 ' + MONO, color: C.text }}>› {w}</div>)}</div>
+          <div><Label>Why it needs a human</Label>{it.why_human.map((w, i) => <div key={i} style={{ font: '11px/1.5 ' + SANS, color: '#e8d6b3' }}>{w}</div>)}
+            {Object.keys(it.evidence || {}).length > 0 && <div className="mt-1" style={{ font: '10.5px/1.5 ' + MONO, color: C.mute }}>{Object.entries(it.evidence).filter(([, v]) => v != null && v !== '').map(([k, v]) => k + ': ' + (typeof v === 'number' ? (k.includes('cost') || k.includes('avoided') ? fmt$(v) : v) : v)).join(' · ')}</div>}</div>
+        </div>
+        {it.reasoning && <div className="mt-2 p-2 rounded" style={{ background: 'rgba(67,217,245,.05)', border: '1px solid rgba(67,217,245,.16)', font: '11px/1.5 ' + SANS, color: '#c7d6e6' }}><b style={{ font: '600 9px ' + MONO, color: C.cyan, letterSpacing: '.12em' }}>AGENT'S REASONING </b>{it.reasoning}</div>}
+        {it.after && <div style={{ font: '10.5px/1.5 ' + SANS, color: C.dim, marginTop: 4 }}>After you approve: {it.after}.</div>}
+        {owner && <div className="flex flex-wrap gap-2 mt-2">
+          {it.kind === 'incident' && <><Btn tone="mint" small disabled={!!busy} onClick={() => run('a' + it.id, () => approveIncident(g, it.id, it.plan_id, it.plan_version))}>{it.approval && it.approval.expired ? 'Re-check & approve v' + it.plan_version : 'Approve v' + it.plan_version}</Btn>
+            <Btn small disabled={!!busy} onClick={() => run('c' + it.id, () => g.api('/api/incidents/' + it.id + '/call', 'POST', {}))}>Call me about this (Cartesia)</Btn>
+            <Btn small tone="danger" disabled={!!busy} onClick={() => run('r' + it.id, () => g.api('/api/incidents/' + it.id + '/reject', 'POST', { reason: 'rejected from approval center' }))}>Reject</Btn></>}
+          {it.kind === 'wo' && <><Btn tone="mint" small disabled={!!busy} onClick={() => run('a' + it.id, () => g.api('/api/maintenance/' + it.id + '/approve', 'POST', { version: it.plan_version }))}>Approve & schedule</Btn><Btn small tone="danger" disabled={!!busy} onClick={() => run('r' + it.id, () => g.api('/api/maintenance/' + it.id + '/reject', 'POST', { reason: 'rejected from approval center' }))}>Reject</Btn></>}
+          {it.kind === 'ghost' && <><Btn tone="mint" small disabled={!!busy} onClick={() => run('a' + it.id, () => g.api('/api/ghost/proposals/' + it.id + '/approve', 'POST', {}))}>Approve & dispatch</Btn><Btn small disabled={!!busy} onClick={() => run('d' + it.id, () => g.api('/api/ghost/proposals/' + it.id + '/dismiss', 'POST', {}))}>Dismiss</Btn></>}
+          {it.kind === 'invoice' && <Btn small onClick={() => { setTab('finops'); onClose(); }}>Open in Finance desk</Btn>}
+        </div>}
+      </div>)}</div></div>
+    {owner && <div><div className="flex items-center gap-2"><Label color="#b49cff">Cartesia voice approvals · readiness</Label><span className="ml-auto flex gap-2"><Btn small onClick={loadVc}>Re-run checks</Btn><Btn small disabled={!!busy} onClick={() => run('vs', async () => { const r = await g.api('/api/voice/setup', 'POST', {}); loadVc(); return r; })}>Re-register voice agent</Btn></span></div>
+      {!vc ? <div style={{ font: '11px ' + SANS, color: C.mute, marginTop: 6 }}>Checking Cartesia…</div> : vc.error ? <div style={{ color: C.red, font: '11px ' + SANS }}>{vc.error}</div> : <>
+        <div className="grid gap-1.5 mt-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>{vc.checks.map(x => <div key={x.name} className="flex gap-2 items-start px-2.5 py-1.5 rounded" style={{ background: C.p1, border: '1px solid ' + (x.ok ? 'rgba(79,224,165,.25)' : 'rgba(255,89,110,.35)') }}><span style={{ color: x.ok ? C.mint : C.red, font: '12px ' + MONO }}>{x.ok ? '✓' : '✗'}</span><div className="min-w-0"><div style={{ font: '600 11px ' + SANS, color: C.text }}>{x.name}</div><div className="truncate" style={{ font: '10px ' + MONO, color: C.mute }} title={x.detail}>{x.detail}</div></div></div>)}</div>
+        <div className="mt-2 p-2.5 rounded" style={{ background: vc.ready ? 'rgba(79,224,165,.06)' : 'rgba(255,187,85,.06)', border: '1px solid ' + (vc.ready ? 'rgba(79,224,165,.3)' : 'rgba(255,187,85,.35)'), font: '11.5px/1.55 ' + SANS, color: C.text }}><b>{vc.ready ? 'Ready to call. ' : 'Not ready. '}</b>{vc.how_to_test}</div>
+        <div className="mt-2"><Label>Call history</Label>{vc.calls.length ? vc.calls.map(cl => <div key={cl.id} className="flex gap-2" style={{ font: '10.5px/1.6 ' + MONO }}><span style={{ color: C.dim }}>{new Date(cl.created * 1000).toLocaleTimeString()}</span><span style={{ color: C.text }}>{cl.id} · {cl.incident_id}</span><span style={{ color: cl.status === 'failed' ? C.red : ['completed', 'ended'].includes(cl.status) ? C.mint : C.cyan }}>{cl.status}</span><span className="truncate" style={{ color: C.mute }}>{cl.error || (cl.duration_s ? cl.duration_s + 's · ' + cl.turns + ' turns' : '')}</span></div>) : <div style={{ font: '11px ' + SANS, color: C.mute }}>No calls yet.</div>}</div>
+      </>}</div>}
+  </div>;
+}
+
+const WL_CLASS = (w) => !w ? 'idle' : /train/.test(w) ? 'training' : /infer/.test(w) ? 'inference' : 'batch';
+const WL_COL = { inference: '#43D9F5', training: '#b49cff', batch: '#FFBB55', idle: 'rgba(110,150,190,.18)' };
+function LoadDistribution({ g }) {
+  const snap = g.snapRef.current; const gp = g.gpusRef.current || (g.state && g.state.gpus); const tw = g.twinRef.current || (g.state && g.state.twin);
+  const tk = Math.floor(g.tickN / 4);
+  const charts = React.useMemo(() => {
+    if (!snap || !gp) return null;
+    const ids = snap.racks.map(r => r.rack_id);
+    const cls = ['inference', 'training', 'batch', 'idle'];
+    const cnt = cls.map(() => new Array(64).fill(0));
+    for (let gi = 0; gi < 512; gi++) cnt[cls.indexOf(WL_CLASS(gp.owner[gi]))][gi >> 3]++;
+    const rackOpt = { animation: false, grid: { left: 34, right: 40, top: 22, bottom: 34 }, tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: '#0d1522', borderColor: '#24334a', textStyle: { color: '#E6EEF7', fontFamily: MONO, fontSize: 10 },
+        formatter: ps => { const i = ps[0].dataIndex; const r = snap.racks[i]; return '<b>' + r.rack_id + '</b> · row ' + ROWS[r.row] + '<br/>' + r.workloads.join(', ') + '<br/>' + ps.map(p => p.seriesName + ': ' + p.value).join('<br/>') + '<br/>GPU ' + r.gpu_temp_c + '°C · limit ' + r.power_limit_w + ' W'; } },
+      legend: { top: 0, right: 0, itemWidth: 10, itemHeight: 8, textStyle: { color: '#8A9BB0', fontFamily: MONO, fontSize: 9 } },
+      xAxis: { type: 'category', data: ids, ...axisStyle, axisLabel: { ...axisStyle.axisLabel, interval: 7, rotate: 0 } },
+      yAxis: [{ type: 'value', max: 8, name: 'GPUs', nameTextStyle: { color: '#6f8299', fontSize: 9 }, ...axisStyle }, { type: 'value', name: 'kW', nameTextStyle: { color: '#6f8299', fontSize: 9 }, ...axisStyle, splitLine: { show: false } }],
+      series: cls.map(k => ({ name: k, type: 'bar', stack: 'g', barWidth: '70%', data: cnt[cls.indexOf(k)], itemStyle: { color: WL_COL[k] } })).concat([{ name: 'rack kW', type: 'line', yAxisIndex: 1, data: snap.racks.map(r => r.power_kw), showSymbol: false, lineStyle: { width: 1.3, color: '#FF596E' }, itemStyle: { color: '#FF596E' } }]),
+      markArea: undefined };
+    rackOpt.series[0].markArea = { silent: true, itemStyle: { color: 'rgba(255,255,255,.025)' }, data: [0, 2, 4, 6].map(r => [{ xAxis: ids[r * 8] }, { xAxis: ids[r * 8 + 7] }]) };
+    const aisles = snap.cooling.map((u, k) => { const rs = snap.racks.filter(r => Math.floor(r.row / 2) === k); return { unit: u.unit_id, heat: rs.reduce((a, r) => a + r.power_kw, 0), demand: u.aisle_demand_m3s, supply: u.aisle_supply_m3s, eff: u.effectiveness, rows: ROWS[2 * k] + ROWS[2 * k + 1] }; });
+    const aisleOpt = { animation: false, grid: { left: 70, right: 46, top: 8, bottom: 20 }, tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: '#0d1522', borderColor: '#24334a', textStyle: { color: '#E6EEF7', fontFamily: MONO, fontSize: 10 } },
+      xAxis: { type: 'value', max: v => Math.max(130, v.max), ...axisStyle, axisLabel: { ...axisStyle.axisLabel, formatter: '{value}%' } }, yAxis: { type: 'category', data: aisles.map(a => a.unit + ' · rows ' + a.rows), inverse: true, ...axisStyle },
+      series: [{ type: 'bar', name: 'airflow demand / supply', barWidth: 12, data: aisles.map(a => { const p = Math.round(a.demand / Math.max(0.01, a.supply) * 100); return { value: p, itemStyle: { color: p > 100 ? '#FF596E' : p > 85 ? '#FFBB55' : '#4FE0A5', borderRadius: 3 } }; }),
+        label: { show: true, position: 'right', color: '#8A9BB0', fontSize: 9, fontFamily: MONO, formatter: p => Math.round(aisles[p.dataIndex].heat) + ' kW · eff ' + Math.round(aisles[p.dataIndex].eff * 100) + '%' }, markLine: { silent: true, symbol: 'none', label: { show: false }, lineStyle: { color: 'rgba(255,89,110,.6)', type: 'dashed' }, data: [{ xAxis: 100 }] } }] };
+    const rowKw = [0, 1, 2, 3, 4, 5, 6, 7].map(r => snap.racks.filter(x => x.row === r).reduce((a, x) => a + x.power_kw, 0));
+    const pdu = tw ? ['PDU-A', 'PDU-B'].map(id => (tw.assets.find(a => a.id === id) || {}).sensors || {}) : [];
+    const powOpt = { animation: false, grid: { left: 30, right: 10, top: 10, bottom: 20 }, tooltip: { trigger: 'axis', backgroundColor: '#0d1522', borderColor: '#24334a', textStyle: { color: '#E6EEF7', fontFamily: MONO, fontSize: 10 } },
+      xAxis: { type: 'category', data: ROWS.split('').map(r => 'row ' + r), ...axisStyle }, yAxis: { type: 'value', name: 'kW', nameTextStyle: { color: '#6f8299', fontSize: 9 }, ...axisStyle },
+      series: [{ type: 'bar', name: 'row power kW', barWidth: '55%', data: rowKw.map((v, i) => ({ value: +v.toFixed(1), itemStyle: { color: Math.floor(i / 2) % 2 ? '#7aa2ff' : '#43D9F5', borderRadius: 3 } })) }] };
+    const tot = cls.map(k => cnt[cls.indexOf(k)].reduce((a, b) => a + b, 0));
+    const shareOpt = { animation: false, tooltip: { backgroundColor: '#0d1522', borderColor: '#24334a', textStyle: { color: '#E6EEF7', fontFamily: MONO, fontSize: 10 } },
+      series: [{ type: 'pie', radius: ['52%', '78%'], center: ['50%', '52%'], label: { color: '#8A9BB0', fontFamily: MONO, fontSize: 9.5, formatter: '{b}\n{c} GPUs' }, labelLine: { length: 6, length2: 4 }, data: cls.map((k, i) => ({ name: k, value: tot[i], itemStyle: { color: WL_COL[k] } })) }] };
+    return { rackOpt, aisleOpt, powOpt, shareOpt, pdu, migs: snap.migrations || [] };
+  }, [tk]);
+  if (!charts) return null;
+  return <Panel style={{ padding: 12 }}>
+    <div className="flex items-baseline gap-2 flex-wrap"><Label color={C.cyan}>Load distribution</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>where GPUs, power and heat sit right now · live</span>
+      {charts.migs.length > 0 && <span className="ml-auto gp-dot-live" style={{ font: '10px ' + MONO, color: C.cyan }}>{charts.migs.map(m => m.workload + ' ' + m.from + '→' + m.to + ' ' + Math.round(m.progress * 100) + '%').join(' · ')}</span>}</div>
+    <div style={{ font: '10px ' + MONO, color: C.dim, marginTop: 2 }}>GPUs per rack by workload type (bars) and rack power (red line). Shaded bands are rows A–B, C–D…; moving a workload shifts its bar and power to the target rack.</div>
+    <EChart option={charts.rackOpt} height={210} />
+    <div className="grid gap-3 mt-1" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
+      <div><Label>Cooling load per aisle · airflow demand vs supply</Label><EChart option={charts.aisleOpt} height={130} /></div>
+      <div><Label>Power by row{charts.pdu.length ? ' · PDU-A ' + Math.round(charts.pdu[0].load_pct || 0) + '% · PDU-B ' + Math.round(charts.pdu[1].load_pct || 0) + '%' : ''}</Label><EChart option={charts.powOpt} height={130} /></div>
+      <div><Label>GPU share by workload type</Label><EChart option={charts.shareOpt} height={130} /></div>
+    </div>
+  </Panel>;
 }
 
 function ControlRoom({ g, setModal, toast, narrow }) {
@@ -1491,6 +1605,7 @@ function UserDiv() {
   const toggleFs = async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else await rootRef.current.requestFullscreen(); } catch (e) { } };
   const [tab, setTab] = React.useState('control'); const [modal, setModal] = React.useState(null); const [toasts, setToasts] = React.useState([]); const [demoOpen, setDemoOpen] = React.useState(false);
   g.setTab = setTab; const [traceReq, setTraceReq] = React.useState(null);
+  const appr = useApprovals(g); const apprN = appr ? appr.items.length : 0;
   const [rej, setRej] = React.useState(''); const [diffs, setDiffs] = React.useState({});
   const toast = React.useCallback((msg, kind) => { const id = Math.random(); setToasts(t => [...t, { id, msg, kind }]); setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4200); }, []);
   React.useEffect(() => { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap'; document.head.appendChild(l); return () => l.remove(); }, []);
@@ -1511,11 +1626,12 @@ function UserDiv() {
       <div className="flex items-center gap-2"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke={C.cyan} strokeWidth="1.6" /><path d="M7 15l3-3 3 2 4-5" stroke={C.cyan} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /><circle cx="17" cy="9" r="1.6" fill={C.red} /></svg>
         <span style={{ font: '600 13px ' + SANS, letterSpacing: '.14em' }}>GRIDPILOT</span></div>
       <span className="gp-nw" style={{ font: '500 10.5px ' + MONO, color: C.mute, letterSpacing: '.12em' }}>{narrow ? '' : 'ATLAS COMPUTE · SFO-01 · '}<span style={{ color: g.conn === 'live' ? C.mint : C.amber }}>{g.conn === 'live' ? 'SIMULATION LIVE' : g.conn.toUpperCase()}</span></span>
-      <div className="flex gap-1 flex-wrap">{[['control', 'Control Room'], ['scen', 'Scenarios'], ['gpus', narrow ? 'GPUs' : 'GPU fleet'], ['twin', narrow ? 'Twin' : 'Twin & reliability'], ['agents', narrow ? 'Agents' : 'Agent Operations'], ['ghost', narrow ? 'Ghost' : 'Ghost architect'], ['finops', narrow ? 'Finance' : 'Finance desk'], ['settings', narrow ? 'Setup' : 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
+      <div className="flex gap-1 flex-wrap">{[['control', 'Control Room'], ['scen', 'Scenarios'], ['gpus', narrow ? 'Load' : 'Load & GPUs'], ['twin', narrow ? 'Twin' : 'Twin & reliability'], ['agents', narrow ? 'Agents' : 'Agent Operations'], ['ghost', narrow ? 'Ghost' : 'Ghost architect'], ['finops', narrow ? 'Finance' : 'Finance desk'], ['settings', narrow ? 'Setup' : 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
       <div className="ml-auto flex items-center flex-wrap gap-x-4 gap-y-1 gp-hdr" style={{ font: '500 10.5px ' + MONO, color: C.mute }}>
         <span className="gp-nw">HEALTH <b style={{ color: health[1] }}>{health[0]}</b></span>
         <span className="gp-nw">INCIDENT <b style={{ color: inc && inc.state !== 'CLOSED' ? C.red : C.mint }}>{inc && inc.state !== 'CLOSED' ? inc.severity + ' ' + inc.id : 'NONE'}</b></span>
         <span className="gp-nw">T+{snap ? fmtT(snap.t) : '--:--'}</span>
+        <button onClick={() => setModal({ kind: 'approvals' })} className="rounded-full gp-nw" style={{ font: '600 10.5px ' + SANS, padding: '4px 10px', color: apprN ? '#1a1206' : C.mute, background: apprN ? C.amber : 'transparent', border: '1px solid ' + (apprN ? C.amber : C.line2) }}>{apprN ? '● ' : ''}Approvals · {apprN}</button>
         <Btn small onClick={toggleFs} title="Full screen (Esc to exit). Best for demos.">{fs ? '⤡ Exit full screen' : '⤢ Full screen'}</Btn>
         {!narrow && <span className="gp-nw">MODE <b style={{ color: C.cyan }}>AUTONOMOUS · HUMAN-GATED</b></span>}
         {userId === ownerId ? <span className="gp-nw" title="Verified Mana identity used for console approvals">OP {userId.slice(0, 6)}</span> : <span title="Live view for visitors. Approvals, payments and settings belong to the operator." style={{ color: C.amber }}>VISITOR · LIVE VIEW</span>}
@@ -1543,6 +1659,7 @@ function UserDiv() {
     {tab === 'ghost' && <GhostTab g={g} toast={toast} narrow={W < 980} />}
     {tab === 'settings' && <Settings g={g} toast={toast} />}
     <CallOverlay g={g} />
+    {modal && modal.kind === 'approvals' && <Modal wide title="Approval center · every decision that needs a human" onClose={() => setModal(null)}><ApprovalCenter g={g} toast={toast} data={appr} setTab={setTab} onClose={() => setModal(null)} /></Modal>}
     {modal && modal.kind === 'diff' && <Modal wide title={'Configuration changes' + (plan ? ' · ' + plan.plan_id + ' v' + plan.version : '')} onClose={() => setModal(null)}>
       {exec && exec.plan_version === (plan && plan.version) ? <div className="flex flex-col gap-3"><Label color={C.cyan}>Actual git diff · execution {exec.id} · {exec.state}</Label><Diff text={exec.data.diff} />
         {exec.data.rollback && <><Label color={C.red}>Rollback diff · {exec.data.rollback.sha.slice(0, 10)} · verified {String(exec.data.rollback.verified)}</Label><Diff text={exec.data.rollback.diff} /></>}</div>
