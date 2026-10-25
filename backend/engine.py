@@ -192,6 +192,11 @@ class Engine:
         if hit:
             self.spawn(self.spawn_specialist(inc_id, "sla_guardian", "Protected-SLA workloads %s are breaching on %s. Assess customer impact and the lowest-risk action set." % (", ".join(hit), inc["rack"]),
                                              requested_by="backend", context={"breaching": hit}, auto=True))
+        # specialists that run on every incident, in parallel with the Remediation Agent; their findings are advisory and audited
+        self.spawn(self.spawn_specialist(inc_id, "thermal_forensics", "Incident %s just opened on %s. Determine the root cause of the hotspot and which racks must not receive workloads." % (inc_id, inc["rack"]),
+                                         requested_by="backend", context={"stage": "incident_open"}, auto=True))
+        self.spawn(self.spawn_specialist(inc_id, "capacity_planner", "Incident %s on %s: find feasible target racks for the workloads that may need to move, keeping protected-SLA workloads on the healthiest racks." % (inc_id, inc["rack"]),
+                                         requested_by="backend", context={"stage": "incident_open"}, auto=True))
         await self.start_creao(inc_id, "diagnose_and_plan", {})
 
     async def start_creao(self, inc_id, task, extra):
@@ -596,6 +601,10 @@ class Engine:
             self.transition(inc, "AWAITING_APPROVAL", "policy-engine", "human approval required", {"approval_id": aid, "plan_id": pid, "plan_version": ver})
             if self.db.get("auto_call", True) and not self.active_call(inc_id):
                 self.spawn(self.start_call(inc_id, "backend"))
+            ncm = self.db.one("select count(*) n from agent_runs where incident_id=? and task='specialist:change_management'", (inc_id,))["n"]
+            if ncm < 2:
+                self.spawn(self.spawn_specialist(inc_id, "change_management", "Review %s v%d as a change request before the human approves it: changes, blast radius, rollback, verification, required approvals, and a GO / GO WITH CONDITIONS / NO-GO verdict." % (pid, ver),
+                                                 requested_by="policy-engine", context={"plan_id": pid, "plan_version": ver}, auto=True))
         else:
             self.db.ex("update plans set status='approved' where id=? and version=?", (pid, ver))
         return {"plan_id": pid, "plan_version": ver, "policy_decision": dec, "evaluation": ev}

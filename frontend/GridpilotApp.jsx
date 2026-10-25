@@ -995,6 +995,30 @@ function Metric({ label, value, unit, sub, tone }) {
   </div>;
 }
 
+const TEAM_LABEL = { thermal_forensics: 'Thermal forensics', capacity_planner: 'Capacity placement', change_management: 'Change management', sla_guardian: 'SLA guardian', finops_auditor: 'FinOps audit' };
+function SpecialistTeam({ g, inc }) {
+  const list = ((g.state && g.state.specialists) || []).filter(s => s.incident_id === inc.id && s.kind !== 'ap_analyst' && s.kind !== 'finance_explainer');
+  const want = ['thermal_forensics', 'capacity_planner', 'change_management'];
+  const rows = want.map(k => ({ k, runs: list.filter(s => s.kind === k) })).concat(list.filter(s => !want.includes(s.kind)).map(s => ({ k: s.kind, runs: [s] })));
+  const tone = s => s === 'completed' ? C.mint : ['failed', 'cancelled'].includes(s) ? C.red : C.cyan;
+  return <div className="px-4 py-3" style={{ borderBottom: '1px solid ' + C.line }}>
+    <div className="flex justify-between items-baseline"><Label>CREAO specialist team</Label><span style={{ font: '9.5px ' + MONO, color: C.dim }}>spawned by GRIDPILOT · advisory · audited</span></div>
+    <div className="mt-2 flex flex-col gap-2">{rows.map(({ k, runs }) => { const s = runs.slice(-1)[0]; const verdict = s && s.finding ? (String(s.finding).match(/\b(NO-GO|GO WITH CONDITIONS|GO)\b/) || [])[1] : null;
+      return <div key={k}>
+        <div className="flex items-center gap-2">
+          <span className={s && !['completed', 'failed', 'cancelled'].includes(s.status) ? 'animate-pulse' : ''} style={{ width: 7, height: 7, borderRadius: 7, background: s ? tone(s.status) : 'transparent', border: '1.5px solid ' + (s ? tone(s.status) : C.dim) }} />
+          <span style={{ font: '600 11px ' + SANS, color: s ? C.text : C.dim }}>{TEAM_LABEL[k] || k.replace(/[-_]/g, ' ')}</span>
+          {verdict && <span style={{ font: '600 9.5px ' + MONO, color: verdict === 'GO' ? C.mint : verdict === 'NO-GO' ? C.red : C.amber, border: '1px solid currentColor', borderRadius: 999, padding: '0 6px' }}>{verdict}</span>}
+          <span className="ml-auto gp-nw" style={{ font: '9.5px ' + MONO, color: s ? tone(s.status) : C.dim }}>{s ? s.status.replace(/_/g, ' ') + (runs.length > 1 ? ' · ' + runs.length + ' runs' : '') : (k === 'change_management' ? 'starts when a plan needs approval' : 'not started')}</span>
+        </div>
+        {s && <div style={{ font: '9.5px ' + MONO, color: C.dim, marginLeft: 15 }}>{s.run_ref}{s.creao_run_id ? ' · CREAO run ' + s.creao_run_id.slice(0, 8) : ''}</div>}
+        {s && s.finding && <div style={{ font: '10.5px/1.45 ' + SANS, color: C.mute, marginLeft: 15, marginTop: 2, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }} title={s.finding}>{s.finding}</div>}
+        {s && s.avoid_racks && s.avoid_racks.length > 0 && <div style={{ font: '9.5px ' + MONO, color: C.amber, marginLeft: 15 }}>avoid {s.avoid_racks.join(', ')}</div>}
+        {s && s.evaluation && <div style={{ font: '9.5px ' + MONO, color: C.text, marginLeft: 15 }}>backend re-check: {s.evaluation.recover_s == null ? 'no recovery' : 'recovers ' + s.evaluation.recover_s + ' s'} · {s.evaluation.final_gpu_c}°C · {s.evaluation.policy_decision}</div>}
+      </div>; })}</div>
+  </div>;
+}
+
 function IncidentPanel({ g, setModal, toast }) {
   const st = g.state; const inc = st && st.incident; const snap = g.snapRef.current;
   const [alt, setAlt] = React.useState(''); const [busy, setBusy] = React.useState(null);
@@ -1025,6 +1049,7 @@ function IncidentPanel({ g, setModal, toast }) {
       </div>
       <div style={{ font: '11px/1.5 ' + SANS, color: C.mute, marginTop: 10 }}>{inc.probable_cause}</div>
     </div>
+    <SpecialistTeam g={g} inc={inc} />
     <div className="px-4 py-3" style={{ borderBottom: '1px solid ' + C.line }}>
       <Label>Agent execution</Label>
       <div className="mt-2 flex flex-col">
@@ -1927,7 +1952,7 @@ function FinanceDesk({ g, toast, narrow }) {
   </div>;
 }
 
-const SPECIALIST_KINDS = [['thermal_forensics', 'Thermal forensics'], ['capacity_planner', 'Capacity placement'], ['finops_auditor', 'FinOps invoice audit'], ['sla_guardian', 'SLA guardian'], ['custom', 'New specialist…']];
+const SPECIALIST_KINDS = [['thermal_forensics', 'Thermal forensics'], ['capacity_planner', 'Capacity placement'], ['finops_auditor', 'FinOps invoice audit'], ['sla_guardian', 'SLA guardian'], ['change_management', 'Change management'], ['custom', 'New specialist…']];
 function SpecialistsPanel({ g, inc }) {
   const st = g.state; const it = st && st.integrations; const cli = it && it.creao_cli;
   const list = ((st && st.specialists) || []).filter(s => !inc || s.incident_id === inc.id);

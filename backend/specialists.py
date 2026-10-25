@@ -11,22 +11,31 @@ import hashlib, json, re
 READ_TOOLS = ["get_incident_context", "get_telemetry", "get_capacity", "list_workloads", "evaluate_plan", "get_cost_comparison",
               "get_reconciliation", "submit_report"]
 MAIN_TOOLS = READ_TOOLS + ["propose_plan", "request_execution", "request_specialist"]
-MAX_PER_INCIDENT = 4
+MAX_PER_INCIDENT = 8
 
 CATALOG = {
     "thermal_forensics": {
         "name": "GRIDPILOT Thermal Forensics Specialist",
-        "mission": "Explain why a remediation failed after it was applied (for example a target rack overheating after a migration). "
+        "mission": "Determine the root cause of a rack hotspot, both when an incident opens and when a remediation failed after it was applied. "
                    "Separate airflow causes (cooling unit degradation, recirculation, aisle airflow deficit) from rack-level hardware causes "
                    "(fan module or heat-sink fault: a rack whose GPU-to-inlet delta is abnormal for its power). Identify racks that must be "
-                   "avoided as targets, and recommend a corrected action set that avoids them.",
-        "trigger": "post-apply failure and verified rollback"},
+                   "avoided as migration targets, and recommend an action set that addresses the actual cause.",
+        "trigger": "every incident at open; again after a post-apply failure and verified rollback"},
     "capacity_planner": {
         "name": "GRIDPILOT Capacity Placement Specialist",
-        "mission": "Find feasible placements when a plan failed capacity, placement or cooling-feasibility validation. Use get_capacity and "
-                   "list_workloads to find racks with enough free GPUs, healthy inlet temperature and a healthy aisle, prefer the same zone to "
-                   "avoid transfer fees, keep protected-SLA workloads on the healthiest racks, and recommend a corrected action set.",
-        "trigger": "validation failure before application"},
+        "mission": "Find feasible placements for the workloads that must move off a hot rack, both when an incident opens and when a plan failed "
+                   "capacity, placement or cooling-feasibility validation. Use get_capacity and list_workloads to find racks with enough free GPUs, "
+                   "healthy inlet temperature and a healthy aisle, prefer the same zone to avoid transfer fees, keep protected-SLA workloads on the "
+                   "healthiest racks, and recommend an action set.",
+        "trigger": "every incident at open; again after a validation failure before application"},
+    "change_management": {
+        "name": "GRIDPILOT Change Management Reviewer",
+        "mission": "Review a proposed remediation plan as a change request before a human approves it. Use get_incident_context to read the plan "
+                   "version awaiting approval. List every change it makes, its blast radius (racks, workloads, protected customers, power and cooling), "
+                   "the pre-checks to run, the exact rollback (revert to the git config snapshot taken before apply), the verification criteria that "
+                   "prove success, and which approvals policy requires. Give a verdict of GO, GO WITH CONDITIONS or NO-GO with reasons in finding. "
+                   "Do not invent new infrastructure actions; leave recommended_actions empty unless the plan must change to be safe.",
+        "trigger": "every plan version that needs human approval"},
     "finops_auditor": {
         "name": "GRIDPILOT FinOps Invoice Auditor",
         "mission": "Audit an incident invoice whose reconciliation did not match. Compare invoice lines with metered usage and transfer "
