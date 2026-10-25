@@ -956,7 +956,8 @@ class Engine:
 
     # ------------------------------------------------------------------ voice (Cartesia)
     def active_call(self, inc_id):
-        return self.db.one("select * from calls where incident_id=? and status in ('initiating','queued','ringing','in_progress','connected','active') order by created desc limit 1", (inc_id,))
+        # anything not terminal counts as live (Cartesia reports created/started/in-progress; a stale row older than 20 min does not block)
+        return self.db.one("select * from calls where incident_id=? and status not in ('failed','completed','ended','canceled','cancelled','no_answer','busy','error') and created > ? order by created desc limit 1", (inc_id, now() - 1200))
 
     async def start_call(self, inc_id, actor):
         import voice

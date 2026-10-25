@@ -679,8 +679,19 @@ async def api_alt(req):
     sug = (b.get("suggestion") or "").strip()
     if not sug: return jresp({"ok": False, "message": "suggestion required"}, 400)
     ENG.event(iid, "operator_suggestion", "operator:" + uid[:8], {"suggestion": sug, "channel": "dashboard"})
+    target = parse_rack(sug)
+    if target:
+        res = await evaluate_operator_target(iid, target, b.get("workload"), "operator:" + uid[:8], "dashboard"); DIRTY["v"] = True
+        return jresp({"ok": True, "operator_option": res})
     run = await ENG.start_creao(iid, "evaluate_alternative", {"operator_suggestion": sug})
     return jresp({"ok": bool(run), "run_ref": run})
+
+@routes.post("/api/incidents/{id}/adopt")
+async def api_adopt(req):
+    uid = operator(req); b = await req.json(); iid = req.match_info["id"]
+    try: r = await adopt_option(iid, str(b.get("option_id") or ""), "operator:" + uid[:8])
+    except ValueError as e: return jresp({"ok": False, "message": str(e)}, 409)
+    return jresp(r, 200 if r.get("ok") else 409)
 
 @routes.post("/api/incidents/{id}/call")
 async def api_call(req):
@@ -1185,6 +1196,108 @@ def remember_option(iid, ev, label):
         "net_expected_benefit_usd": ev["net_expected_benefit_usd"], "at_sim_t": ev["computed_at_sim_t"], "baseline_exposure_usd": ev["baseline"]["sla_exposure_usd"]})
     OPTIONS[iid] = OPTIONS[iid][-12:]
 
+RACK_RE = re.compile(r"\b(?:r|rack)\s*-?\s*0*(\d{1,2})\b", re.I)
+OP_OPTIONS = {}      # iid -> {option_id: {"actions", "label", "target"}}  operator-built options awaiting adoption
+
+def parse_rack(text):
+    m = RACK_RE.search(str(text or "")); return ("R%02d" % int(m.group(1))) if m else None
+
+def operator_option(iid, target, workload=None):
+    """Build the operator's option exactly as asked: the current plan with its migrations sent to `target` as far as it has room.
+    Returns (actions, notes, infeasible_reason). Never silently substitutes another rack."""
+    inc = ENG.incident(iid); cfg = SIM.config; rk = inc["rack"]
+    if target not in cfg["racks"]: return None, [], "%s does not exist; racks are R01 to R64" % target
+    if target == rk: return None, [], "%s is the overheating rack itself; load has to move off it, not onto it" % target
+    used = {r: 0 for r in cfg["racks"]}
+    for w in cfg["workloads"].values(): used[w["rack"]] += w["gpus"]
+    snap = SIM.snapshot(field=False); live = {x["rack_id"]: x for x in snap["racks"]}
+    free = 8 - used[target]; notes = []
+    t_row = int(target[1:]) - 1; t_row //= 8; unit = "C%02d" % (t_row // 2 + 1); ueff = float(SIM.unit_eff[t_row // 2])
+    if live[target]["gpu_temp_c"] >= S.THRESH["gpu_warning_c"]: notes.append("%s is already hot (%.1f°C GPU)" % (target, live[target]["gpu_temp_c"]))
+    if ueff < 0.8: notes.append("%s sits in the aisle fed by %s, which is degraded (%d%% effectiveness), so it gets the same warm air" % (target, unit, round(ueff * 100)))
+    if cfg["racks"][target]["zone"] != cfg["racks"][rk]["zone"]: notes.append("%s is in zone %s, %s is in %s: moving across zones adds a data-transfer charge" % (target, cfg["racks"][target]["zone"], rk, cfg["racks"][rk]["zone"]))
+    if not cfg["racks"][target]["reserve_pool"]: notes.append("%s is a production rack, not reserve capacity" % target)
+    on_rk = [w for w, v in cfg["workloads"].items() if v["rack"] == rk]
+    if workload:
+        wl = [w for w in on_rk if workload.lower() in w.lower()]
+        if not wl: return None, notes, "%s is not running on %s (it runs %s)" % (workload, rk, ", ".join(on_rk))
+        on_rk = wl
+    cur = ENG.current_plan(iid); base = [dict(a) for a in (cur["actions"] if cur else [])]
+    base_migs = [a for a in base if a["type"] == "migrate_workload" and a.get("workload") in on_rk]
+    order = [a["workload"] for a in base_migs] or sorted(on_rk, key=lambda w: -cfg["workloads"][w]["gpus"])
+    moved, kept = [], []
+    for w in order:
+        g = cfg["workloads"][w]["gpus"]
+        if g <= free: moved.append(w); free -= g
+        else: kept.append(w)
+    if not moved:
+        need = min(cfg["workloads"][w]["gpus"] for w in order)
+        fr = 8 - used[target]
+        return None, notes, "%s has %s free; the smallest workload on %s that would move needs %d GPUs" % (target, "no GPUs" if fr == 0 else ("only %d GPU%s" % (fr, "" if fr == 1 else "s")), rk, need)
+    acts = [a for a in base if not (a["type"] == "migrate_workload" and a.get("workload") in moved)]
+    acts = [a for a in acts if not (a["type"] == "migrate_workload" and a.get("workload") in on_rk and a.get("workload") not in moved and workload)]
+    acts = [{"type": "migrate_workload", "workload": w, "to_rack": target} for w in moved] + [{k: v for k, v in a.items() if k not in ("from_rack", "from_pct", "from_watts")} for a in acts]
+    for w in kept:
+        stay = next((a["to_rack"] for a in base_migs if a["workload"] == w), None)
+        notes.append("%s (%d GPUs) does not fit on %s after that%s" % (w, cfg["workloads"][w]["gpus"], target, (", so it still goes to " + stay) if stay else ", so it stays on " + rk))
+    return acts, notes, None
+
+def compare_with_current(iid, ev, target):
+    cur = ENG.current_plan(iid); ce = cur and cur["evaluation"]
+    f, fin = ev["forecast"], ev["finance"]; thr = S.THRESH["gpu_recovered_c"]
+    out = {"recover_s": f["recover_s"], "final_gpu_c": f["final_gpu_c"], "hottest_gpu_end_c": f.get("max_gpu_end_c"),
+           "target_peak_gpu_c": (f.get("peak_target_gpu_c") or {}).get(target), "incremental_cost_usd": fin["incremental_cost_usd"],
+           "sla_exposure_usd": fin["sla_exposure_usd"], "policy": ev["policy"]["decision"],
+           "policy_reasons": [r["rule"] for r in ev["policy"].get("plan_rules", []) + ev["policy"].get("actions", []) if r.get("decision") != "AUTO_ALLOWED"][:6]}
+    tr = []
+    if f["recover_s"] is None: tr.append("does NOT bring %s below %.0f°C within 10 minutes" % (ENG.incident(iid)["rack"], thr))
+    if ce:
+        cf = ce["forecast"]; cfin = ce["finance"]
+        out["current_plan"] = {"plan_id": cur["id"], "plan_version": cur["version"], "actions": [STY.act_txt(a) for a in cur["actions"]], "recover_s": cf["recover_s"], "final_gpu_c": cf["final_gpu_c"],
+                               "hottest_gpu_end_c": cf.get("max_gpu_end_c"), "incremental_cost_usd": cfin["incremental_cost_usd"], "sla_exposure_usd": cfin["sla_exposure_usd"]}
+        if f["recover_s"] is not None and cf["recover_s"] is not None and abs(f["recover_s"] - cf["recover_s"]) >= 5:
+            tr.append("recovers %s (%ds vs %ds)" % ("faster" if f["recover_s"] < cf["recover_s"] else "slower", f["recover_s"], cf["recover_s"]))
+        if abs(f["final_gpu_c"] - cf["final_gpu_c"]) >= 0.5: tr.append("ends at %.1f°C on the hot rack vs %.1f°C" % (f["final_gpu_c"], cf["final_gpu_c"]))
+        d = fin["incremental_cost_usd"] - cfin["incremental_cost_usd"]
+        if abs(d) >= 0.01: tr.append("costs $%.2f %s ($%.2f vs $%.2f)" % (abs(d), "less" if d < 0 else "more", fin["incremental_cost_usd"], cfin["incremental_cost_usd"]))
+        if fin["sla_exposure_usd"] > cfin["sla_exposure_usd"] + 1: tr.append("leaves $%.0f of SLA exposure vs $%.0f" % (fin["sla_exposure_usd"], cfin["sla_exposure_usd"]))
+    he = f.get("max_gpu_end_c")
+    che = ce and ce["forecast"].get("max_gpu_end_c")
+    if he is not None and he >= thr and (che is None or he > che + 0.4): tr.append("the hottest GPU in the pod still ends at %.1f°C, above the %.0f°C recovered line%s" % (he, thr, (" (current plan: %.1f°C)" % che) if che is not None else ""))
+    tp = out["target_peak_gpu_c"]
+    if tp is not None: tr.append("%s peaks at %.1f°C after taking the load%s" % (target, tp, " (above the %.0f°C warning line)" % S.THRESH["gpu_warning_c"] if tp >= S.THRESH["gpu_warning_c"] else ""))
+    out["tradeoffs"] = tr
+    out["suitable"] = f["recover_s"] is not None and ev["policy"]["decision"] != "FORBIDDEN" and fin["sla_exposure_usd"] < 1 and (tp is None or tp < S.THRESH["gpu_warning_c"]) and (he is None or he < S.THRESH["gpu_warning_c"])
+    return out
+
+async def evaluate_operator_target(iid, target, workload, actor, channel):
+    acts, notes, why = operator_option(iid, target, workload)
+    ENG.event(iid, "operator_option", actor, {"target": target, "workload": workload, "channel": channel, "feasible": not why, "reason": why, "notes": notes})
+    if why:
+        return {"feasible": False, "target_rack": target, "why_not": why, "notes": notes,
+                "say_to_operator": "Explain plainly why %s cannot take this load (why_not), mention any notes, then offer the current plan or ask for another rack." % target}
+    ev = await ENG.evaluate(acts, ENG.incident(iid)["rack"], "operator: move to " + target); remember_option(iid, ev, "operator: move to " + target)
+    oid = "OPT-%s" % secrets.token_hex(2)
+    OP_OPTIONS.setdefault(iid, {})[oid] = {"actions": acts, "label": "operator: move to " + target, "target": target}
+    cmp = compare_with_current(iid, ev, target)
+    if ev["policy"]["decision"] == "FORBIDDEN":
+        return {"feasible": False, "target_rack": target, "why_not": "policy forbids it: " + "; ".join(cmp["policy_reasons"]), "notes": notes, "forecast": cmp,
+                "say_to_operator": "Explain the policy reason this option is forbidden, then offer the current plan or another rack."}
+    return {"feasible": True, "option_id": oid, "target_rack": target, "actions": [STY.act_txt(a) for a in ev["actions"]], "forecast": cmp, "notes": notes,
+            "say_to_operator": ("Read the operator's option back (actions), then the tradeoffs versus the current plan in plain words, including where it is worse. "
+                                + ("It is workable. " if cmp["suitable"] else "It is NOT recommended: say exactly why (tradeoffs/notes). ")
+                                + "Ask whether they want to make it the plan. Only if they say yes, call adopt_alternative with option_id %s, then read the new plan version back and ask for approval." % oid)}
+
+async def adopt_option(iid, oid, actor, said=None):
+    """A human chose an evaluated option: it becomes a new plan version authored by them. It still needs the normal approval."""
+    opt = OP_OPTIONS.get(iid, {}).get(oid)
+    if not opt: return {"ok": False, "message": "unknown or expired option %s; evaluate the alternative again" % oid}
+    meta = {"reasoning_summary": "Operator-selected option (%s), adopted on request%s. Evaluated by the same deterministic forecast and policy engine as agent plans." % (opt["label"], (": \"%s\"" % str(said)[:200]) if said else ""), "origin": actor, "operator_option": oid}
+    r = await ENG.propose_plan(iid, opt["actions"], actor, meta)
+    remember_option(iid, r["evaluation"], "%s v%d (operator)" % (r["plan_id"], r["plan_version"])); DIRTY["v"] = True
+    return {"ok": True, "plan_id": r["plan_id"], "plan_version": r["plan_version"], "policy_decision": r["policy_decision"], "actions": [STY.act_txt(a) for a in r["evaluation"]["actions"]],
+            "say_to_operator": "Read plan %s version %d back and ask: Do you approve plan %s version %d? Approve only on a clear yes." % (r["plan_id"], r["plan_version"], r["plan_id"], r["plan_version"])}
+
 def neighbors(rid):
     r, c = S.rack_rc(rid); out = []
     for dr, dc in ((0, -1), (0, 1), (1, 0), (-1, 0)):
@@ -1406,7 +1519,13 @@ async def voice_tool(req):
             res["how_to_approve"] = "read the plan back, ask 'Do you approve plan %s version %s?', and on a clear yes call approve_plan with their exact words" % ((pl or {}).get("id"), (pl or {}).get("version"))
         elif tool == "evaluate_alternative":
             sug = str(args.get("suggestion", ""))[:500]; strat = args.get("strategy") or "other"
-            ENG.event(iid, "operator_suggestion", actor, {"suggestion": sug, "strategy": strat, "channel": "voice"})
+            ENG.event(iid, "operator_suggestion", actor, {"suggestion": sug, "strategy": strat, "channel": "voice", "target_rack": args.get("target_rack")})
+            target = parse_rack(args.get("target_rack")) or parse_rack(sug)
+            if target and strat != "throttle_only" and strat != "fan_boost_only":
+                res = await evaluate_operator_target(iid, target, args.get("workload"), actor, "voice")
+                ENG.db.ex("insert into tool_calls(ts,provider,run_ref,incident_id,tool,args,result,ok) values(?,?,?,?,?,?,?,?)", (time.time(), "cartesia", tok["call_id"], iid, tool, clipj(args, 4000), clipj(res), 1))
+                ENG.event(iid, "voice_tool_call", actor, {"tool": tool, "ok": True, "target_rack": target, "feasible": res.get("feasible")}); DIRTY["v"] = True
+                return jresp(res)
             det = None; acts = strategy_actions(iid, strat, args.get("throttle_pct"))
             if acts:
                 ev = await ENG.evaluate(acts, ENG.incident(iid)["rack"], "operator: " + strat); remember_option(iid, ev, "operator suggestion: " + strat)
@@ -1420,6 +1539,8 @@ async def voice_tool(req):
                    "say_to_operator": "Give the forecast numbers now. They can approve the current plan, wait for a revised plan version, or keep asking." if det else "This suggestion could not be mapped to concrete actions; ask them which workload and which rack."}
         elif tool == "get_cost_comparison":
             res = await tool_dispatch("get_cost_comparison", {}, iid, actor, "voice")
+        elif tool == "adopt_alternative":
+            res = await adopt_option(iid, str(args.get("option_id") or ""), "operator(voice):%s" % tok["operator"], args.get("operator_said"))
         elif tool == "approve_plan":
             res = await phone_approval(iid, tok, args)
         elif tool == "reject_plan":

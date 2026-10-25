@@ -9,7 +9,12 @@ TOOLS = {
     "evaluate_alternative": ("Evaluate a remediation alternative the operator suggests. Returns a deterministic forecast and, when ready, CREAO's revised plan.", {
         "suggestion": {"type": "string", "description": "The operator's suggestion in their own words."},
         "strategy": {"type": "string", "enum": ["throttle_only", "migrate_only", "migrate_and_throttle", "fan_boost_only", "other"], "description": "Closest strategy category."},
-        "throttle_pct": {"type": "number", "description": "GPU power reduction percent if the operator named one, else 10."}}),
+        "throttle_pct": {"type": "number", "description": "GPU power reduction percent if the operator named one, else 10."},
+        "target_rack": {"type": "string", "description": "The rack the operator wants load moved to, if they named one (e.g. 'R38'). Always pass it when a rack is named."},
+        "workload": {"type": "string", "description": "The specific workload they want moved, if they named one; else omit."}}),
+    "adopt_alternative": ("Make the operator's evaluated option the new plan version (only after they clearly say they want it). It still needs their approval afterwards.", {
+        "option_id": {"type": "string", "description": "option_id returned by evaluate_alternative."},
+        "operator_said": {"type": "string", "description": "Their exact words choosing this option."}}),
     "get_cost_comparison": ("Return the structured cost, SLA-risk and recovery comparison of evaluated options with assumptions.", {}),
     "approve_plan": ("Record the on-call engineer's spoken approval of an exact plan version. Call ONLY after you read the plan back and they clearly said yes. Pass their exact words.", {
         "plan_id": {"type": "string", "description": "Plan id from get_incident_context."},
@@ -24,7 +29,10 @@ GRIDPILOT itself placed this call to {{operator_name}}, the registered on-call e
 Rules:
 - Open calmly: who you are, that it is about a live incident, and that you need a decision. Then call get_incident_context before stating any fact, and again whenever they ask for an update. Never invent numbers, racks, costs or plan versions.
 - Brief them in plain words, short sentences: what is happening, the probable cause, what the agent recommends (plan id and version, each action in everyday language), expected recovery time, the added cost, and the customer/SLA risk if nothing is done. Offer to repeat or slow down.
-- If they suggest a different approach, call evaluate_alternative ONCE and read them the forecast it returns right away (recovery time, cost, SLA risk), including when their option is worse. It does not change the plan; a revised plan version only exists if get_incident_context later shows one. Let them approve the current version, wait for a revision, or ask more.
+- If they suggest a different approach, call evaluate_alternative ONCE (pass target_rack whenever they name a rack, e.g. "R38"). Their idea is always evaluated exactly as asked; never swap in a different rack.
+  - If feasible is false: explain why_not in plain words (for example the rack has no free GPUs, is already hot, sits in the degraded aisle, or policy forbids it), then offer the current plan or ask for another rack.
+  - If feasible is true: read their option back, then the tradeoffs versus the current plan, honestly, including where it is worse and the notes. Say whether it is suitable. Ask if they want it as the plan. Only on a clear yes call adopt_alternative with the option_id, then read the new plan version back and ask "Do you approve plan X version N?" before approve_plan.
+  - If they keep the current plan, approve or discuss that version as usual.
 - To approve: read the exact plan back ("plan PLN-x version N: move ..., set ..."), then ask a direct question: "Do you approve plan PLN-x version N?" Only after a clear, unambiguous yes, call approve_plan with plan_id, plan_version and operator_said set to their exact words. Never approve on silence, "maybe", "hold on", questions, or a yes to a different question. If unsure, ask again.
 - Tell them exactly what the backend returns: approved and executing, or why not (for example the plan changed: then brief the new version and ask again).
 - If they reject, call reject_plan with their reason. If they want someone else to decide, call escalate_incident.

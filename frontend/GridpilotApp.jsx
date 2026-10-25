@@ -1112,7 +1112,7 @@ function StdbAccess({ g }) {
 
 function IncidentPanel({ g, setModal, toast }) {
   const st = g.state; const inc = st && st.incident; const snap = g.snapRef.current;
-  const [alt, setAlt] = React.useState(''); const [busy, setBusy] = React.useState(null);
+  const [alt, setAlt] = React.useState(''); const [optRes, setOptRes] = React.useState(null); const [busy, setBusy] = React.useState(null);
   const run = async (key, fn) => { setBusy(key); try { const r = await fn(); if (r && r.message) toast(r.message, r.ok === false ? 'err' : 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(null); };
   const apr = inc && inc.approvals && inc.approvals.slice(-1)[0];
   if (!inc) return <div className="p-5 flex flex-col gap-3">
@@ -1191,7 +1191,17 @@ function IncidentPanel({ g, setModal, toast }) {
       </div>
       {!['CLOSED', 'EXECUTING', 'VALIDATING', 'MONITORING_RECOVERY'].includes(inc.state) && <div className="flex gap-2 mt-2">
         <input value={alt} onChange={e => setAlt(e.target.value)} placeholder="Request alternative, e.g. throttle R17 instead of migrating" className="flex-1 rounded-full px-3 outline-none" style={{ background: C.p2, border: '1px solid ' + C.line2, color: C.text, font: '11.5px ' + SANS, height: 30 }} onKeyDown={e => e.stopPropagation()} />
-        <Btn disabled={!alt.trim() || !!busy} onClick={() => run('alt', async () => { const r = await g.api('/api/incidents/' + inc.id + '/alternative', 'POST', { suggestion: alt }); setAlt(''); return { ok: r.ok, message: r.ok ? 'Sent to CREAO for re-analysis' : 'CREAO not connected' }; })}>Request Alternative</Btn>
+        <Btn disabled={!alt.trim() || !!busy} onClick={() => run('alt', async () => { const r = await g.api('/api/incidents/' + inc.id + '/alternative', 'POST', { suggestion: alt }); setAlt(''); if (r.operator_option) { setOptRes(r.operator_option); return { ok: true, message: r.operator_option.feasible ? 'Evaluated your option on ' + r.operator_option.target_rack : r.operator_option.target_rack + ' cannot take it: see below' }; } setOptRes(null); return { ok: r.ok, message: r.ok ? 'Sent to CREAO for re-analysis' : 'CREAO not connected' }; })}>Request Alternative</Btn>
+      </div>}
+      {optRes && <div className="mt-2 rounded-lg p-3" style={{ background: C.p2, border: '1px solid ' + (optRes.feasible ? (optRes.forecast && optRes.forecast.suitable ? 'rgba(79,224,165,.4)' : 'rgba(255,187,85,.4)') : 'rgba(255,89,110,.4)') }}>
+        <div className="flex items-baseline gap-2"><Label color={optRes.feasible ? (optRes.forecast.suitable ? C.mint : C.amber) : C.red}>Your option · move load to {optRes.target_rack}</Label><span className="ml-auto" style={{ font: '10px ' + MONO, color: C.dim }}>{optRes.feasible ? (optRes.forecast.suitable ? 'workable' : 'not recommended') : 'not feasible'}</span><button onClick={() => setOptRes(null)} aria-label="Dismiss" style={{ color: C.mute, font: '15px ' + SANS }}>×</button></div>
+        {!optRes.feasible && <div style={{ font: '12px/1.5 ' + SANS, color: C.text, marginTop: 4 }}>{optRes.why_not}</div>}
+        {optRes.feasible && <>
+          <div className="mt-1 flex flex-col gap-0.5">{optRes.actions.map((a, i) => <div key={i} style={{ font: '11px ' + MONO, color: C.text }}>› {a}</div>)}</div>
+          <div className="grid gap-1.5 mt-2" style={{ gridTemplateColumns: 'repeat(4, minmax(0,1fr))' }}>{[['Recovery', optRes.forecast.recover_s != null ? optRes.forecast.recover_s + 's' : 'none'], ['Hot rack end', optRes.forecast.final_gpu_c + '°C'], [optRes.target_rack + ' peak', optRes.forecast.target_peak_gpu_c != null ? optRes.forecast.target_peak_gpu_c + '°C' : '—'], ['Cost', fmt$(optRes.forecast.incremental_cost_usd)]].map(([k, v]) => <div key={k} className="px-2 py-1 rounded" style={{ background: C.p1, border: '1px solid ' + C.line }}><Label>{k}</Label><div style={{ font: '500 11.5px ' + MONO, color: C.text, marginTop: 1 }}>{v}</div></div>)}</div>
+          {optRes.forecast.tradeoffs.length > 0 && <div className="mt-2" style={{ font: '11px/1.55 ' + SANS, color: C.mute }}>vs current plan: {optRes.forecast.tradeoffs.join(' · ')}</div>}</>}
+        {(optRes.notes || []).length > 0 && <div className="mt-1" style={{ font: '11px/1.55 ' + SANS, color: C.amber }}>{optRes.notes.join(' · ')}</div>}
+        {optRes.feasible && <div className="mt-2 flex gap-2"><Btn small tone="primary" disabled={!!busy} onClick={() => run('adopt', async () => { const r = await g.api('/api/incidents/' + inc.id + '/adopt', 'POST', { option_id: optRes.option_id }); setOptRes(null); return { ok: r.ok, message: r.ok ? 'Plan ' + r.plan_id + ' v' + r.plan_version + ' created from your option · approve it above' : r.message }; })}>Make this the plan</Btn><span style={{ font: '10.5px ' + SANS, color: C.dim, alignSelf: 'center' }}>creates a new plan version; it still needs approval</span></div>}
       </div>}
     </div>}
     {!plan && inc.state !== 'CLOSED' && <div className="px-4 py-3" style={{ borderBottom: '1px solid ' + C.line, font: '11.5px/1.5 ' + SANS, color: C.mute }}>Waiting for CREAO to propose a plan. Plans only appear from real agent tool calls (or an operator what-if in Agent Operations).</div>}
