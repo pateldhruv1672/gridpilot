@@ -166,14 +166,25 @@ def full_state():
             "fail_armed": ENG.fail_armed, "sim_t": round(SIM.t, 1), "evidence": EVIDENCE, "specialists": specialist_runs(), "desk": DESK.snapshot(),
             "work_orders": REL.list(), "pm_proof": PRED.proof(), "twin": twin_payload(), "agent_summary": agent_summary(), "loops": loops(), "ghost": GHOST.view(), "gpus": FLEET.payload(), "scenario": SCEN.board(), "stdb_watcher": watcher_view()}
 
+def _racks(v):
+    """Agents return avoid_racks as a list, a comma string or prose; the UI always gets a list of rack IDs."""
+    if isinstance(v, list): return [str(x) for x in v if x is not None][:16]
+    if isinstance(v, str): return list(dict.fromkeys(re.findall(r"\bR\d{1,2}\b", v)))[:16]
+    if isinstance(v, dict): return [str(k) for k in v][:16]
+    return []
+
+def _txt(v):
+    if v is None or isinstance(v, str): return v
+    return json.dumps(v)[:4000]
+
 def specialist_runs():
     out = []
     for r in ENG.db.all("select * from agent_runs where task like 'specialist:%' order by created desc limit 20"):
         d = json.loads(r["data"] or "{}"); sp = d.get("specialist") or {}; st = d.get("structured") or {}
         out.append({"run_ref": r["id"], "incident_id": r["incident_id"], "kind": r["task"].split(":", 1)[1], "name": sp.get("name"), "mission": sp.get("mission"),
                     "trigger": sp.get("trigger"), "requested_by": d.get("requested_by"), "status": r["status"], "creao_run_id": r["provider_run_id"], "agent_id": d.get("agent_id"),
-                    "question": d.get("question"), "finding": st.get("finding"), "root_cause": st.get("root_cause"), "avoid_racks": st.get("avoid_racks"),
-                    "confidence": st.get("confidence"), "evaluation": d.get("evaluation"), "created": r["created"], "completed": r["completed"],
+                    "question": d.get("question"), "finding": _txt(st.get("finding")), "root_cause": _txt(st.get("root_cause")), "avoid_racks": _racks(st.get("avoid_racks")),
+                    "confidence": st.get("confidence") if isinstance(st.get("confidence"), (int, float)) else None, "evaluation": d.get("evaluation"), "created": r["created"], "completed": r["completed"],
                     "result_excerpt": (d.get("result_text") or "")[:1500]})
     return out
 

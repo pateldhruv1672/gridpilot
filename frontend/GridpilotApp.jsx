@@ -1023,6 +1023,8 @@ function Metric({ label, value, unit, sub, tone }) {
   </div>;
 }
 
+const asList = (v) => Array.isArray(v) ? v : typeof v === 'string' ? (v.match(/\bR\d{1,2}\b/g) || []) : [];
+const asText = (v) => v == null ? v : typeof v === 'string' ? v : JSON.stringify(v);
 const TEAM_LABEL = { thermal_forensics: 'Thermal forensics', capacity_planner: 'Capacity placement', change_management: 'Change management', sla_guardian: 'SLA guardian', finops_auditor: 'FinOps audit' };
 function SpecialistTeam({ g, inc }) {
   const list = ((g.state && g.state.specialists) || []).filter(s => s.incident_id === inc.id && s.kind !== 'ap_analyst' && s.kind !== 'finance_explainer');
@@ -1040,8 +1042,8 @@ function SpecialistTeam({ g, inc }) {
           <span className="ml-auto gp-nw" style={{ font: '9.5px ' + MONO, color: s ? tone(s.status) : C.dim }}>{s ? s.status.replace(/_/g, ' ') + (runs.length > 1 ? ' · ' + runs.length + ' runs' : '') : (k === 'change_management' ? 'starts when a plan needs approval' : 'not started')}</span>
         </div>
         {s && <div style={{ font: '9.5px ' + MONO, color: C.dim, marginLeft: 15 }}>{s.run_ref}{s.creao_run_id ? ' · CREAO run ' + s.creao_run_id.slice(0, 8) : ''}</div>}
-        {s && s.finding && <div style={{ font: '10.5px/1.45 ' + SANS, color: C.mute, marginLeft: 15, marginTop: 2, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }} title={s.finding}>{s.finding}</div>}
-        {s && s.avoid_racks && s.avoid_racks.length > 0 && <div style={{ font: '9.5px ' + MONO, color: C.amber, marginLeft: 15 }}>avoid {s.avoid_racks.join(', ')}</div>}
+        {s && s.finding && <div style={{ font: '10.5px/1.45 ' + SANS, color: C.mute, marginLeft: 15, marginTop: 2, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }} title={asText(s.finding)}>{asText(s.finding)}</div>}
+        {s && asList(s.avoid_racks).length > 0 && <div style={{ font: '9.5px ' + MONO, color: C.amber, marginLeft: 15 }}>avoid {asList(s.avoid_racks).join(', ')}</div>}
         {s && s.evaluation && <div style={{ font: '9.5px ' + MONO, color: C.text, marginLeft: 15 }}>backend re-check: {s.evaluation.recover_s == null ? 'no recovery' : 'recovers ' + s.evaluation.recover_s + ' s'} · {s.evaluation.final_gpu_c}°C · {s.evaluation.policy_decision}</div>}
       </div>; })}</div>
   </div>;
@@ -2036,8 +2038,8 @@ function SpecialistsPanel({ g, inc }) {
     {list.map(s => <div key={s.run_ref} style={{ borderTop: '1px solid ' + C.line, marginTop: 8, paddingTop: 7 }}>
       <div className="flex justify-between gap-2"><span style={{ font: '600 11px ' + SANS, color: C.text }}>{(s.name || s.kind).replace('GRIDPILOT ', '')}</span><span style={{ font: '600 9.5px ' + MONO, color: tone(s.status) }}>{s.status.replace('_', ' ')}</span></div>
       <div style={{ font: '10px ' + MONO, color: C.dim }}>{s.run_ref}{s.creao_run_id ? ' · run ' + s.creao_run_id.slice(0, 8) : ''} · by {(s.requested_by || '').split(':')[0]}</div>
-      {s.finding && <div style={{ font: '11px/1.5 ' + SANS, color: C.mute, marginTop: 4 }}>{s.finding}</div>}
-      {s.avoid_racks && s.avoid_racks.length > 0 && <div style={{ font: '10px ' + MONO, color: C.amber, marginTop: 2 }}>avoid {s.avoid_racks.join(', ')}</div>}
+      {s.finding && <div style={{ font: '11px/1.5 ' + SANS, color: C.mute, marginTop: 4 }}>{asText(s.finding)}</div>}
+      {asList(s.avoid_racks).length > 0 && <div style={{ font: '10px ' + MONO, color: C.amber, marginTop: 2 }}>avoid {asList(s.avoid_racks).join(', ')}</div>}
       {s.evaluation && <div style={{ font: '10px/1.5 ' + MONO, color: C.text, marginTop: 4 }}>backend forecast: {s.evaluation.recover_s == null ? 'no recovery in 600 s' : 'recovers in ' + s.evaluation.recover_s + ' s'} · {s.evaluation.final_gpu_c}°C · ${s.evaluation.incremental_cost_usd} · {s.evaluation.policy_decision}</div>}
       {s.evaluation && canPlan && s.evaluation.policy_decision !== 'FORBIDDEN' && <div className="mt-1.5"><Btn small onClick={() => adopt(s.run_ref)}>Adopt as plan</Btn></div>}
     </div>)}
