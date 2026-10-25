@@ -549,7 +549,7 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd, i
     scene.add(blades);
     // strategy-impact halos (floor rings around racks a plan changed)
     const halos = [];
-    for (let k = 0; k < 8; k++) { const m = new THREE.Mesh(new THREE.RingGeometry(0.62, 0.74, 40), new THREE.MeshBasicMaterial({ color: 0x4fe0a5, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending })); m.rotation.x = -Math.PI / 2; m.visible = false; scene.add(m); halos.push(m); }
+    for (let k = 0; k < 8; k++) { const m = new THREE.Mesh(new THREE.RingGeometry(0.78, 0.96, 48), new THREE.MeshBasicMaterial({ color: 0x4fe0a5, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending })); m.rotation.x = -Math.PI / 2; m.visible = false; scene.add(m); halos.push(m); }
     // selection box
     const selBox = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(0.76, 2.16, 1.26)), new THREE.LineBasicMaterial({ color: 0x43d9f5, transparent: true, opacity: 1 }));
     selBox.visible = false; scene.add(selBox);
@@ -687,7 +687,7 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd, i
           const th = gp.throttle[g] && !reduced ? 0.6 + 0.4 * Math.sin(clock * 7 + g) : 1; const dim = gp.owner[g] ? 1 : 0.35; blades.setColorAt(g, col.setRGB(c3[0] * th * dim, c3[1] * th * dim, c3[2] * th * dim)); }
           blades.instanceColor.needsUpdate = true; }
         const imp = impactRef && impactRef.current;
-        halos.forEach((h, k) => { const r = imp && imp.racks[k]; if (!r) { h.visible = false; return; } const [x, z] = rackPos(r.idx); h.position.set(x, 0.02, z); h.visible = true; h.material.color.set(impactColor(r.d)); const s = reduced ? 1 : 1 + 0.12 * Math.sin(clock * 2.2 + k); h.scale.set(s, s, s); h.material.opacity = (r.d <= -1 || r.d >= 1 ? 0.75 : 0.35) * (reduced ? 1 : 0.7 + 0.3 * Math.sin(clock * 2.2 + k)); });
+        halos.forEach((h, k) => { const r = imp && imp.racks[k]; if (!r) { h.visible = false; return; } const [x, z] = rackPos(r.idx); h.position.set(x, 0.03, z); h.visible = true; h.material.color.set(impactColor(r.d)); const s = reduced ? 1 : 1 + 0.1 * Math.sin(clock * 2.2 + k); h.scale.set(s * 0.8, s * 1.15, s); h.material.opacity = (r.d <= -1 || r.d >= 1 ? 0.75 : 0.35) * (reduced ? 1 : 0.7 + 0.3 * Math.sin(clock * 2.2 + k)); });
         if (sel != null) { const [x, z] = rackPos(sel); selBox.position.set(x, 1.0, z); selBox.visible = true; selBox.material.opacity = 0.6 + 0.4 * Math.sin(clock * 3); } else selBox.visible = false;
         snap.cooling.forEach((u, k) => { const bad = 1 - u.effectiveness; crah[k].g.material.emissive.set(bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan); crah[k].g.material.emissiveIntensity = 0.12 + 0.25 * (bad > 0.15 ? (reduced ? 1 : 0.6 + 0.4 * Math.sin(clock * 4)) : 0.3); crah[k].grille.material.color.set(bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan); crah[k].grille.material.opacity = 0.12 + 0.35 * u.flow_factor * u.fan_pct / 100; });
         // plumes on hot racks
@@ -745,7 +745,7 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd, i
           d.style.color = rk.status === 'critical' ? C.red : rk.status === 'elevated' ? C.amber : (i === sel ? C.cyan : '#7f93ab');
           d.style.padding = strong ? '2px 6px' : '0'; d.style.borderRadius = '4px'; d.style.background = strong ? 'rgba(7,11,19,.78)' : 'transparent'; d.style.border = strong ? '1px solid ' + (rk.status === 'critical' ? 'rgba(255,89,110,.5)' : rk.status === 'elevated' ? 'rgba(255,187,85,.45)' : 'rgba(67,217,245,.45)') : 'none';
           d.textContent = strong ? rk.rack_id + '  ' + rk.gpu_temp_c.toFixed(1) + '°C' : rk.rack_id;
-          if (impR) { const ic = impactColor(impR.d); d.style.color = ic; d.style.padding = '2px 6px'; d.style.background = 'rgba(7,11,19,.85)'; d.style.border = '1px solid ' + ic + '88'; d.textContent = rk.rack_id + '  ' + impR.before.gpu_c.toFixed(1) + ' → ' + rk.gpu_temp_c.toFixed(1) + '°C  ' + (impR.d < 0 ? '▼' : impR.d > 0 ? '▲' : '') + Math.abs(impR.d).toFixed(1) + (impR.moved.length ? (impR.role === 'target' ? '  +' : '  −') + impR.moved.join(', ') : ''); }
+          if (impR) { const ic = impactColor(impR.d); d.style.color = ic; d.style.padding = '2px 6px'; d.style.background = 'rgba(7,11,19,.85)'; d.style.border = '1px solid ' + ic + '88'; d.textContent = rk.rack_id + ' ' + (impR.d < 0 ? '▼' : impR.d > 0 ? '▲' : '') + Math.abs(impR.d).toFixed(1) + '° → ' + rk.gpu_temp_c.toFixed(1) + '°C' + (impR.moved.length ? (impR.movedIn ? ' +' : ' −') + impR.moved.length + 'wl' : ''); d.title = impR.moved.join(', '); }
         }
         rowLabels.forEach((d, r) => { const [sx, sy, vis] = project(X0 - 0.55, 0.05, rowZ0(r) + 0.6); d.style.display = vis ? 'block' : 'none'; d.style.transform = 'translate(' + sx + 'px,' + sy + 'px) translate(-50%,-50%)'; });
         unitLabels.forEach((d, k) => { const u = snap.cooling[k]; const [sx, sy, vis] = project(9.0, 2.5, 3.0 + 4.8 * k); d.style.display = vis ? 'block' : 'none'; d.style.transform = 'translate(' + sx + 'px,' + sy + 'px) translate(-50%,-100%)'; const bad = 1 - u.effectiveness; d.style.color = bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan; d.textContent = u.unit_id + ' ' + Math.round(u.effectiveness * 100) + '% · ' + u.supply_temp_c.toFixed(1) + '°C'; });
@@ -944,8 +944,8 @@ function computeImpact(inc, snap) {
   const plan = (inc.plans || []).find(p => p.version === ex.plan_version) || (inc.plans || []).slice(-1)[0];
   const byId = {}; snap.racks.forEach((r, i) => { byId[r.rack_id] = [r, i]; });
   const racks = Object.entries(ib.racks).map(([rid, b]) => { const hit = byId[rid]; if (!hit) return null; const [r, idx] = hit;
-    const moved = b.role === 'source' ? b.workloads.filter(w => !r.workloads.includes(w)) : b.role === 'target' ? r.workloads.filter(w => !b.workloads.includes(w)) : [];
-    return { rid, idx, role: b.role, before: b, now: { gpu_c: r.gpu_temp_c, inlet_c: r.inlet_temp_c, power_kw: r.power_kw, status: r.status }, d: +(r.gpu_temp_c - b.gpu_c).toFixed(1), dp: +(r.power_kw - b.power_kw).toFixed(2), moved }; }).filter(Boolean);
+    const out = b.workloads.filter(w => !r.workloads.includes(w)), inn = r.workloads.filter(w => !b.workloads.includes(w)); const moved = inn.length ? inn : out; const movedIn = inn.length > 0;
+    return { rid, idx, role: b.role, before: b, now: { gpu_c: r.gpu_temp_c, inlet_c: r.inlet_temp_c, power_kw: r.power_kw, status: r.status }, d: +(r.gpu_temp_c - b.gpu_c).toFixed(1), dp: +(r.power_kw - b.power_kw).toFixed(2), moved, movedIn }; }).filter(Boolean);
   const units = Object.entries(ib.units || {}).map(([uid, b]) => { const c = snap.cooling.find(x => x.unit_id === uid); return c && { uid, before: b, now: { fan_pct: c.fan_pct, supply_c: c.supply_temp_c } }; }).filter(Boolean);
   const main = racks.find(r => r.role === 'incident') || racks[0];
   return { ex, plan, age, simAge: snap.t - ib.sim_t, racks, units, main, forecastEnd: plan && plan.forecast ? plan.forecast.final_gpu_c : null, recovered: main ? main.now.gpu_c < 80 : false };
@@ -956,7 +956,7 @@ function ImpactRows({ imp, compact }) {
   return <div className="flex flex-col gap-1">{imp.racks.map(r => { const lo = Math.min(r.before.gpu_c, r.now.gpu_c, 50), hi = Math.max(r.before.gpu_c, r.now.gpu_c, 95); const x = (v) => ((v - lo) / (hi - lo)) * 100;
     return <div key={r.rid} className="grid items-center gap-2" style={{ gridTemplateColumns: compact ? '42px 1fr 92px' : '42px 110px 1fr 120px' }}>
       <span style={{ font: '600 11px ' + MONO, color: C.text }}>{r.rid}</span>
-      {!compact && <span className="truncate" style={{ font: '10px ' + SANS, color: C.dim }} title={r.moved.join(', ')}>{ROLE_TXT[r.role] || r.role}{r.moved.length ? ' · ' + r.moved.length : ''}</span>}
+      {!compact && <span className="truncate" style={{ font: '10px ' + SANS, color: C.dim }} title={r.moved.join(', ')}>{r.moved.length ? (r.movedIn ? 'took ' : 'shed ') + r.moved.length + ' workload' + (r.moved.length > 1 ? 's' : '') : (ROLE_TXT[r.role] || r.role)}</span>}
       <div className="relative" style={{ height: 10 }}>
         <div className="absolute" style={{ left: 0, right: 0, top: 4, height: 2, background: 'rgba(110,150,190,.15)', borderRadius: 2 }} />
         <div className="absolute" style={{ left: Math.min(x(r.before.gpu_c), x(r.now.gpu_c)) + '%', width: Math.abs(x(r.now.gpu_c) - x(r.before.gpu_c)) + '%', top: 4, height: 2, background: impactColor(r.d), borderRadius: 2 }} />
@@ -971,7 +971,7 @@ function ImpactRows({ imp, compact }) {
 function ImpactHud({ imp }) {
   if (!imp) return null; const m = imp.main;
   return <div className="rounded-lg p-3" style={{ width: 340, background: 'rgba(10,16,26,.9)', border: '1px solid ' + (imp.recovered ? 'rgba(79,224,165,.4)' : 'rgba(67,217,245,.3)') }}>
-    <div className="flex items-baseline gap-2"><Label color={imp.recovered ? C.mint : C.cyan}>Strategy impact · measured</Label><span className="ml-auto" style={{ font: '10px ' + MONO, color: C.dim }}>{imp.plan ? imp.plan.plan_id + ' v' + imp.plan.version : imp.ex.id} · applied {fmtT(Math.max(0, imp.simAge))} ago</span></div>
+    <Label color={imp.recovered ? C.mint : C.cyan}>Strategy impact · measured</Label><div style={{ font: '10px ' + MONO, color: C.dim, marginTop: 2 }}>{imp.plan ? imp.plan.plan_id + ' v' + imp.plan.version : imp.ex.id} · applied {fmtT(Math.max(0, imp.simAge))} ago (sim)</div>
     {m && <div className="flex items-baseline gap-2 mt-1.5"><span style={{ font: '600 20px ' + MONO, color: impactColor(m.d), letterSpacing: '-.02em' }}>{m.d < 0 ? '▼' : '▲'}{Math.abs(m.d).toFixed(1)}°C</span><span style={{ font: '11px ' + SANS, color: C.mute }}>{m.rid} GPU hotspot{imp.forecastEnd != null ? ' · forecast end ' + imp.forecastEnd + '°C' : ''}</span></div>}
     <div className="mt-2"><ImpactRows imp={imp} compact /></div>
     <div style={{ font: '9.5px ' + MONO, color: C.dim, marginTop: 6 }}>before = rack state captured at apply · now = live telemetry · halos on racks in the scene</div>
@@ -1051,7 +1051,7 @@ function IncidentPanel({ g, setModal, toast }) {
           ['Policy', plan.policy.decision.replace('_', ' '), plan.policy.decision === 'AUTO_ALLOWED' ? C.mint : plan.policy.decision === 'FORBIDDEN' ? C.red : C.amber]].concat(st.desk && st.desk.budgets['5200'] ? [['Burst budget after', fmt$(st.desk.budgets['5200'].budget - st.desk.budgets['5200'].actual - plan.finance.incremental_cost_usd) + ' of ' + fmt$(st.desk.budgets['5200'].budget), (st.desk.budgets['5200'].budget - st.desk.budgets['5200'].actual - plan.finance.incremental_cost_usd) < 0 ? C.red : C.text]] : []).map(([k, v, c]) =>
           <div key={k} className="px-2.5 py-2 rounded" style={{ background: C.p2, border: '1px solid ' + C.line }}><Label>{k}</Label><div style={{ font: '500 12px ' + MONO, color: c, marginTop: 3 }}>{v}</div></div>)}
       </div>
-      <div className="mt-2" style={{ font: '10.5px/1.5 ' + SANS, color: C.mute }}>{plan.policy.plan_rules.concat(plan.policy.actions).filter(r => r.decision !== 'AUTO_ALLOWED').map(r => r.rule).join(' · ')}</div>
+      <div className="mt-2" style={{ font: '10.5px/1.5 ' + SANS, color: C.mute }}>{plan.policy.plan_rules.concat(plan.policy.actions).filter(r => r.decision !== 'AUTO_ALLOWED').map(r => r.rule).filter((x, i, a) => a.indexOf(x) === i).join(' · ')}</div>
       {plan.meta && plan.meta.reasoning_summary && <div className="mt-2 p-2.5 rounded" style={{ background: 'rgba(67,217,245,.05)', border: '1px solid rgba(67,217,245,.18)', font: '11.5px/1.5 ' + SANS, color: '#c7d6e6' }}><Label color={C.cyan}>CREAO reasoning</Label><div className="mt-1">{plan.meta.reasoning_summary}</div>{plan.meta.confidence != null && <div style={{ font: '10px ' + MONO, color: C.mute, marginTop: 4 }}>confidence {plan.meta.confidence}</div>}</div>}
       {apr && apr.status === 'approved' && apr.data && apr.data.operator_said && <div className="mt-3 p-3 rounded" style={{ background: 'rgba(79,224,165,.07)', border: '1px solid rgba(79,224,165,.4)' }}><Label color={C.mint}>Approved by phone · on-call {String(apr.data.actor || '').replace('on-call:', '')} · {apr.data.phone}</Label><div style={{ font: 'italic 14px/1.45 ' + SANS, color: C.text, marginTop: 4 }}>“{apr.data.operator_said}”</div><div style={{ font: '10px ' + MONO, color: C.mute, marginTop: 3 }}>{apr.data.call_id} · plan v{apr.data.plan_version} read back by the voice agent before the yes · {apr.data.renewed_window ? 'window re-checked on live telemetry first · ' : ''}logged in the audit trail</div></div>}
       {inc.state === 'AWAITING_APPROVAL' && apr && <div className="mt-3 flex items-center gap-2 flex-wrap px-2.5 py-2 rounded" style={{ background: 'rgba(255,187,85,.06)', border: '1px solid rgba(255,187,85,.3)', font: '10.5px ' + MONO, color: C.mute }}>
@@ -1783,7 +1783,7 @@ function FinanceDesk({ g, toast, narrow }) {
   const act = async (path, body, okMsg) => { setBusy(true); try { const r = await g.api(path, 'POST', body || {}); toast(r.message || okMsg, r.ok === false ? 'err' : 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(false); };
   const pending = D.invoices.filter(i => !['paid', 'disputed_resolved'].includes(i.status));
   const approved = D.invoices.filter(i => ['approved', 'partially_disputed'].includes(i.status));
-  const inv = D.invoices.find(i => i.id === sel) || pending[0];
+  const inv = D.invoices.find(i => i.id === sel) || D.invoices.find(i => !['paid', 'disputed_resolved', 'approved'].includes(i.status)) || pending[0];
   const agentRecs = (i) => i.decisions.filter(d => d.kind === 'agent_recommendation');
   const drafts = (i) => i.decisions.filter(d => d.kind === 'dispute_draft');
   const apRun = (st.specialists || []).find(s => s.kind === 'ap_analyst');
