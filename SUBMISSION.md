@@ -10,6 +10,12 @@
 - **Try your own scenario:** "+ Test invoice" submits any invoice (bank change, price creep, over-billed usage, unknown vendor or your own) and it goes through the same autonomous pass and controls live.
 - **What's real:** ledger, matching, controls, payment runs, audit trail, CREAO runs. **Simulated:** vendors, invoices, bank feed, history.
 
+## Digital twin, predictive maintenance and agent operations
+- **Living DCIM:** the twin models energy supply (utility feed, transformer, generator, tariff and carbon), battery storage (500 kWh BESS, two UPS strings), cooling (4 CRAHs, chiller), facility (PDUs, leak, VESDA) and IT & security (core switches, access control), coupled to the thermal simulator. All simulated; sensors are noisy and wear is hidden from the agents.
+- **Predictive maintenance:** remaining-useful-life from sensor trends only (OLS on a physics-shaped degradation model, 90% prediction band, P(failure within 5/15 min)). Scored against the hidden ground truth: in the verified run the C02 bearing was flagged 1,101 s before its failure, RUL error 32 s, 98% of predictions within ±25%.
+- **Reliability loop (verified live, WO-7101):** prediction → CREAO Reliability Agent evaluated 9 options under the predicted outage → plan (migrate inference_api_07 to R22, raise C01/C03/C04 fans) forecast 84.8 °C vs 91.9 °C doing nothing → operator approved → mitigations committed to git → C02 taken out for maintenance → observed pod peak 79.7 °C, no SLA breach, $4,354 conditional exposure avoided → incident prevented.
+- **Autonomous value loops:** Remediation (CREAO), Reliability (CREAO), Finance (CREAO), Energy (BESS peak shaving, autonomous inside a 40% reserve), Security (always escalates to a human). Agent Operations shows the summary KPIs, the roster and an animated React Flow decision trace of every loop: signal → detection → agent run → options evaluated → chosen plan and policy → human → action → verification.
+
 ## Cartesia
 - Voice is the approval channel: a Managed Agent calls the on-call engineer, explains the incident, evaluates their alternative live through a webhook tool, and collects approval with a one-time code verified by the backend.
 - Features: Managed Agents, Sonic voice, agent webhook tools with dynamic variables, phone number provisioning, outbound calls, call status/transcript polling.

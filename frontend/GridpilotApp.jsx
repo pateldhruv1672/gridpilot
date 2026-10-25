@@ -1,6 +1,7 @@
 
 import * as THREE from 'three@0.160.0';
 import * as echarts from 'echarts@5';
+import { ReactFlow, Background, Controls, Handle, Position, BaseEdge, getSmoothStepPath, MarkerType } from '@xyflow/react@12';
 
 const C = { bg: '#070B13', p1: '#101826', p2: '#141E2D', line: 'rgba(110,150,190,0.16)', line2: 'rgba(110,150,190,0.28)', cyan: '#43D9F5', mint: '#4FE0A5', amber: '#FFBB55', red: '#FF596E', text: '#E6EEF7', mute: '#8A9BB0', dim: '#56677C' };
 const MONO = "'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -344,7 +345,7 @@ function Diff({ text }) {
 
 function useGridpilot() {
   const { url, wsUrl, error } = useIngressUrl('gridpilot', { ttlSeconds: 7 * 86400 });
-  const snapRef = React.useRef(null);
+  const snapRef = React.useRef(null); const twinRef = React.useRef(null);
   const [tickN, setTickN] = React.useState(0);
   const [state, setState] = React.useState(null);
   const [conn, setConn] = React.useState('connecting');
@@ -367,14 +368,14 @@ function useGridpilot() {
         if (dead) return;
         ws = new WebSocket(wsUrl + '/ws?ticket=' + encodeURIComponent(ticket));
         ws.onopen = () => { retry = 0; setConn('live'); };
-        ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'tick') { snapRef.current = m.snap; setTickN(n => n + 1); } else if (m.type === 'state') setState(m.state); };
+        ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'tick') { snapRef.current = m.snap; if (m.twin) twinRef.current = m.twin; setTickN(n => n + 1); } else if (m.type === 'state') { if (m.state.twin && !twinRef.current) twinRef.current = m.state.twin; setState(m.state); } };
         ws.onclose = () => { if (dead) return; setConn('reconnecting'); timer = setTimeout(open, Math.min(8000, 800 * 2 ** retry++)); };
       } catch (e) { setConn('error: ' + e.message); timer = setTimeout(open, 4000); }
     };
     open();
     return () => { dead = true; clearTimeout(timer); if (ws) ws.close(); };
   }, [url, wsUrl, api]);
-  return { url, error, snapRef, tickN, state, conn, api };
+  return { url, error, snapRef, twinRef, tickN, state, conn, api };
 }
 
 function Metric({ label, value, unit, sub, tone }) {
@@ -519,13 +520,29 @@ function BottomStrip({ g, open, setOpen }) {
   const powOpt = React.useMemo(() => lineOpt([{ name: 'IT kW', data: s.map(p => [p.t, p.it_kw]), color: C.cyan, area: true }, { name: 'Facility kW', data: s.map(p => [p.t, p.facility_kw]), color: '#7aa2ff' }]), [st]);
   const pueOpt = React.useMemo(() => lineOpt([{ name: 'PUE', data: s.map(p => [p.t, p.pue]), color: C.mint }, { name: 'C02 effectiveness', data: s.map(p => [p.t, p.c02_eff]), color: C.amber }]), [st]);
   const costOpt = React.useMemo(() => lineOpt([{ name: 'Electricity $', data: s.map(p => [p.t, p.electricity_usd]), color: C.cyan, area: true }, { name: 'Transfer $', data: s.map(p => [p.t, p.transfer_usd]), color: C.amber }]), [st]);
+  const tw = g.twinRef.current || (st && st.twin); const snap = g.snapRef.current; const tk = Math.floor(g.tickN / 4);
+  const heatOpt = React.useMemo(() => { if (!snap) return null; return { animation: false, grid: { left: 26, right: 8, top: 6, bottom: 20 }, tooltip: { backgroundColor: '#0d1522', borderColor: '#24334a', textStyle: { color: '#E6EEF7', fontFamily: MONO, fontSize: 10 }, formatter: p => 'R' + String(p.value[1] * 8 + p.value[0] + 1).padStart(2, '0') + ' · ' + p.value[2] + '°C' },
+    xAxis: { type: 'category', data: [1, 2, 3, 4, 5, 6, 7, 8], ...axisStyle, splitArea: { show: false } }, yAxis: { type: 'category', data: ROWS.split(''), inverse: true, ...axisStyle },
+    visualMap: { show: false, min: 55, max: 92, inRange: { color: ['#1d4f9e', '#43D9F5', '#4FE0A5', '#FFBB55', '#ff7340', '#FF596E'] } },
+    series: [{ type: 'heatmap', data: snap.racks.map((r, i) => [i % 8, Math.floor(i / 8), r.gpu_temp_c]), itemStyle: { borderColor: '#101826', borderWidth: 2, borderRadius: 3 }, label: { show: true, color: 'rgba(4,10,18,.75)', fontSize: 8, fontFamily: MONO, formatter: p => Math.round(p.value[2]) } }] }; }, [tk]);
+  const ts = (tw && tw.series) || [];
+  const vibOpt = React.useMemo(() => lineOpt(['C01', 'C02', 'C03', 'C04'].map((k, i) => ({ name: k + ' mm/s', data: ts.map(p => [p.t, p['vib_' + k]]), color: [C.cyan, C.red, C.mint, '#7aa2ff'][i], mark: i === 0 ? { y: 7.1, color: 'rgba(255,187,85,.8)', label: 'ISO alarm 7.1' } : undefined }))), [tk]);
+  const enOpt = React.useMemo(() => lineOpt([{ name: 'grid kW', data: ts.map(p => [p.t, p.grid_kw]), color: '#7aa2ff', area: true }, { name: 'BESS kW', data: ts.map(p => [p.t, p.bess_kw]), color: C.mint }, { name: 'SoC %', data: ts.map(p => [p.t, p.soc]), color: C.amber }]), [tk]);
+  const riskOpt = React.useMemo(() => { const pr = (tw && tw.predictions) || {}; const ids = Object.keys(pr).sort(); return { animation: false, grid: { left: 52, right: 14, top: 8, bottom: 20 }, tooltip: { backgroundColor: '#0d1522', borderColor: '#24334a', textStyle: { color: '#E6EEF7', fontFamily: MONO, fontSize: 10 } },
+    xAxis: { type: 'value', min: 0, max: 100, ...axisStyle, axisLabel: { ...axisStyle.axisLabel, formatter: '{value}%' } }, yAxis: { type: 'category', data: ids, ...axisStyle },
+    series: [{ type: 'bar', name: 'P(failure within 15 min)', barWidth: 8, data: ids.map(k => ({ value: Math.round(((pr[k].p_fail_15m) || 0) * 100), itemStyle: { color: RISK_COLOR[pr[k].risk] || C.dim, borderRadius: 3 } })), label: { show: true, position: 'right', color: '#8A9BB0', fontSize: 9, fontFamily: MONO, formatter: p => { const x = pr[ids[p.dataIndex]]; return x.rul_s != null ? 'RUL ' + Math.round(x.rul_s) + 's' : (x.risk === 'failed' ? 'FAILED' : ''); } } }] }; }, [tk]);
   const evs = ((st && st.events) || []).filter(e => !['agent_tool_call', 'voice_tool_call', 'duplicate_telemetry_suppressed'].includes(e.type)).slice(0, 40);
-  return <div style={{ borderTop: '1px solid ' + C.line, background: C.p1 }}>
+  return <div style={{ borderTop: '1px solid ' + C.line, background: C.p1, maxHeight: open ? '48%' : undefined, overflow: open ? 'auto' : undefined, flexShrink: 0 }}>
     <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-3 px-4" style={{ height: 30, color: C.mute }}>
-      <Label>Operations strip</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>{open ? '▾ collapse' : '▸ temperatures · power · airflow · timeline · finance'}</span>
+      <Label>Operations strip</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>{open ? '▾ collapse' : '▸ subsystems · rack map · predictive risk · energy · temperatures · power · timeline'}</span>
       <span className="ml-auto" style={{ font: '10px ' + MONO, color: C.dim }}>{s.length ? 'sim t+' + Math.round(s[s.length - 1].t) + 's' : ''}</span>
     </button>
+    {open && tw && <div className="px-3 pb-2"><SubsystemTiles tw={tw} compact onOpen={() => g.setTab && g.setTab('twin')} /></div>}
     {open && <div className="grid gap-3 px-3 pb-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
+      <Panel style={{ padding: 8 }}><Label>Rack GPU temperature map (8 × 8)</Label>{heatOpt && <EChart option={heatOpt} height={150} />}</Panel>
+      <Panel style={{ padding: 8 }}><Label>Predicted failure risk · next 15 min</Label><EChart option={riskOpt} height={150} /></Panel>
+      <Panel style={{ padding: 8 }}><Label>CRAH fan vibration (predictive signal)</Label><EChart option={vibOpt} height={150} /></Panel>
+      <Panel style={{ padding: 8 }}><Label>Energy · grid import, battery, state of charge</Label><EChart option={enOpt} height={150} /></Panel>
       <Panel style={{ padding: 8 }}><Label>R17 GPU hotspot vs inlet air</Label><EChart option={tempOpt} height={130} /></Panel>
       <Panel style={{ padding: 8 }}><Label>Power curve</Label><EChart option={powOpt} height={130} /></Panel>
       <Panel style={{ padding: 8 }}><Label>PUE · cooling health</Label><EChart option={pueOpt} height={130} /></Panel>
@@ -537,6 +554,116 @@ function BottomStrip({ g, open, setOpen }) {
     </div>}
   </div>;
 }
+
+const SUB_ICON = { energy: 'M13 2L4 14h7l-1 8 9-12h-7z', battery: 'M3 7h15v10H3zM21 10v4M6 10v4M9 10v4', cooling: 'M12 2v20M4.5 6.5l15 11M19.5 6.5l-15 11', facility: 'M3 21V8l9-5 9 5v13M9 21v-6h6v6', it_security: 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z' };
+const SS_COLOR = { nominal: '#4FE0A5', warning: '#FFBB55', critical: '#FF596E', failed: '#FF596E' };
+const RISK_COLOR = { nominal: '#4FE0A5', learning: '#56677C', watch: '#9fd8ec', warning: '#FFBB55', critical: '#FF596E', failed: '#FF596E' };
+function SubsystemTiles({ tw, onOpen, compact }) {
+  if (!tw) return null;
+  return <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(' + (compact ? 150 : 170) + 'px, 1fr))' }}>
+    {tw.subsystems.map(s => { const c = SS_COLOR[s.status] || C.mute;
+      return <button key={s.id} onClick={onOpen} className="text-left px-3 py-2 rounded-lg" style={{ background: s.status === 'nominal' ? C.p1 : c + '12', border: '1px solid ' + (s.status === 'nominal' ? C.line : c + '66') }}>
+        <div className="flex items-center gap-1.5"><Glyph d={SUB_ICON[s.id]} color={c} /><span style={{ font: '600 11px ' + SANS, color: C.text }}>{s.label}</span>
+          <span className={s.status !== 'nominal' ? 'gp-dot-live' : ''} style={{ marginLeft: 'auto', font: '600 8.5px ' + MONO, letterSpacing: '.12em', color: c }}>{s.status.toUpperCase()}</span></div>
+        <div className="flex flex-col mt-1">{Object.entries(s.kpi).map(([k, v]) => <div key={k} className="flex justify-between gap-2" style={{ font: '10px/1.5 ' + MONO }}><span style={{ color: C.dim }}>{k}</span><span style={{ color: C.text, whiteSpace: 'nowrap' }}>{v}</span></div>)}</div>
+      </button>; })}
+  </div>;
+}
+
+function TwinTab({ g, toast, narrow }) {
+  const tw = g.twinRef.current || (g.state && g.state.twin); const st = g.state;
+  const [asset, setAsset] = React.useState('C02'); const [woSel, setWoSel] = React.useState(null); const [busy, setBusy] = React.useState(false);
+  if (!tw) return <div className="flex-1 p-6" style={{ color: C.mute, font: '12px ' + SANS }}>Loading digital twin…</div>;
+  const preds = tw.predictions || {}; const hist = tw.history || {};
+  const A = tw.assets.find(a => a.id === asset) || tw.assets[0]; const P = preds[A.id] || {};
+  const wos = (st && st.work_orders) || []; const wo = wos.find(w => w.id === woSel) || wos.find(w => !['CLOSED', 'REJECTED', 'FAILED'].includes(w.state)) || wos[0];
+  const proof = (st && st.pm_proof) || {};
+  const act = async (path, body, msg) => { setBusy(true); try { const r = await g.api(path, 'POST', body || {}); toast(r.message || msg, r.ok === false ? 'err' : 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(false); };
+  const H_ = hist[A.id] || []; const proj = P.projection || [];
+  const hiOpt = { animation: false, grid: { left: 40, right: 14, top: 24, bottom: 22 }, tooltip: { trigger: 'axis', backgroundColor: '#0d1522', borderColor: '#24334a', textStyle: { color: '#E6EEF7', fontFamily: MONO, fontSize: 10 } },
+    legend: { top: 0, right: 4, itemWidth: 10, itemHeight: 2, data: ['observed', '90% band', 'forecast'], textStyle: { color: '#8A9BB0', fontFamily: MONO, fontSize: 9 } },
+    xAxis: { type: 'value', ...axisStyle, axisLabel: { ...axisStyle.axisLabel, formatter: v => 't+' + Math.round(v) + 's' }, min: 'dataMin', max: 'dataMax' },
+    yAxis: { type: 'value', name: 'health index (1 = failure)', nameTextStyle: { color: '#6f8299', fontSize: 9 }, min: 0, max: v => Math.max(1.15, v.max), ...axisStyle },
+    series: [
+      { name: 'observed', type: 'line', data: H_.map(p => [p[0], p[1]]), showSymbol: false, lineStyle: { width: 1.4, color: C.cyan }, itemStyle: { color: C.cyan },
+        markLine: { silent: true, symbol: 'none', label: { color: C.red, fontSize: 9, fontFamily: MONO, formatter: 'functional failure' }, lineStyle: { color: 'rgba(255,89,110,.7)', type: 'dashed' }, data: [{ yAxis: 1 }] } },
+      { name: 'band lo', type: 'line', stack: 'band', data: proj.map(p => [p[0], p[2]]), showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 }, tooltip: { show: false } },
+      { name: '90% band', type: 'line', stack: 'band', data: proj.map(p => [p[0], Math.max(0, p[3] - p[2])]), showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { color: 'rgba(255,187,85,.16)' } },
+      { name: 'forecast', type: 'line', data: proj.map(p => [p[0], p[1]]), showSymbol: false, lineStyle: { width: 1.6, color: C.amber, type: 'dashed' }, itemStyle: { color: C.amber } },
+    ] };
+  const plan = wo && wo.plans && wo.plans.slice(-1)[0];
+  const cmpOpt = plan ? lineOpt([{ name: 'do nothing (pod peak °C)', data: plan.evaluation.counterfactual.series, color: C.red, mark: { y: 88, color: 'rgba(255,89,110,.7)', label: 'critical 88°C' } }, { name: 'with plan v' + plan.version, data: plan.evaluation.with_plan.series, color: C.mint, area: true }]) : null;
+  const ser = tw.series || [];
+  const energyOpt = { ...lineOpt([{ name: 'grid import kW', data: ser.map(p => [p.t, p.grid_kw]), color: '#7aa2ff', area: true }, { name: 'BESS kW (+ discharge)', data: ser.map(p => [p.t, p.bess_kw]), color: C.mint }]),
+    yAxis: [{ type: 'value', scale: true, ...axisStyle }, { type: 'value', min: 0, max: 100, ...axisStyle, splitLine: { show: false }, axisLabel: { ...axisStyle.axisLabel, formatter: '{value}%' } }] };
+  energyOpt.series.push({ type: 'line', name: 'SoC %', yAxisIndex: 1, data: ser.map(p => [p.t, p.soc]), showSymbol: false, lineStyle: { width: 1.2, color: C.amber, type: 'dotted' }, itemStyle: { color: C.amber } });
+  const groups = [['energy', 'Energy supply'], ['battery', 'Battery storage'], ['cooling', 'Cooling'], ['facility', 'Facility'], ['it_security', 'IT & security']];
+  const keySensor = (a) => { const p = preds[a.id]; if (p && p.value != null) return p.value + ' ' + (p.unit || ''); const s = a.sensors || {}; const k = Object.keys(s)[0]; return k ? (k.replace(/_/g, ' ') + ' ' + s[k]) : ''; };
+  const rulTxt = (p) => p.rul_s == null ? (p.risk === 'learning' ? 'learning trend…' : 'stable') : (p.rul_s >= 120 ? Math.round(p.rul_s / 60) + ' min' : Math.round(p.rul_s) + ' s');
+  return <div className={'flex-1 min-h-0 flex flex-col' + (narrow ? ' overflow-auto' : '')} style={{ background: C.bg }}>
+    <div className="px-3 pt-3"><div className="flex items-center gap-3 mb-2"><Label color={C.cyan}>Digital twin · full cyber-physical state</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>site clock {tw.site_time} · tariff ${tw.tariff}/kWh · {tw.carbon} gCO₂/kWh · all assets simulated, sensors noisy, wear hidden from agents</span></div>
+      <SubsystemTiles tw={tw} onOpen={() => { }} /></div>
+    <div className="flex-1 min-h-0 grid gap-3 p-3" style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(240px, 280px) minmax(0, 1fr) minmax(300px, 360px)', gridAutoRows: narrow ? 'max-content' : undefined }}>
+      <Panel className="overflow-auto" style={{ padding: 8 }}>
+        {groups.map(([gid, gl]) => <div key={gid} className="mb-2"><div className="flex items-center gap-1.5 px-1 py-1"><Glyph d={SUB_ICON[gid]} color={C.dim} size={11} /><Label>{gl}</Label></div>
+          {tw.assets.filter(a => a.subsystem === gid).map(a => { const p = preds[a.id] || {}; const rc = a.state === 'maintenance' ? '#b49cff' : RISK_COLOR[p.risk] || C.dim; const on = a.id === A.id;
+            return <button key={a.id} onClick={() => setAsset(a.id)} className="w-full text-left px-2 py-1.5 rounded-md flex items-center gap-2" style={{ background: on ? 'rgba(67,217,245,.07)' : 'transparent', border: '1px solid ' + (on ? 'rgba(67,217,245,.3)' : 'transparent') }}>
+              <span className={['warning', 'critical', 'failed'].includes(p.risk) || a.state === 'maintenance' ? 'gp-dot-live' : ''} style={{ width: 7, height: 7, borderRadius: 7, background: rc, flexShrink: 0 }} />
+              <div className="min-w-0 flex-1"><div className="flex justify-between gap-1"><span style={{ font: '600 11px ' + MONO, color: C.text }}>{a.id}</span><span style={{ font: '10px ' + MONO, color: rc, whiteSpace: 'nowrap' }}>{a.state === 'maintenance' ? 'in maintenance' : a.state === 'failed' ? 'FAILED' : p.risk && p.risk !== 'nominal' ? (p.risk + (p.rul_s != null ? ' · ' + rulTxt(p) : '')) : ''}</span></div>
+                <div className="truncate" style={{ font: '9.5px ' + MONO, color: C.dim }}>{keySensor(a)}</div></div></button>; })}</div>)}
+      </Panel>
+      <div className="flex flex-col gap-3 min-h-0 overflow-auto">
+        <Panel style={{ padding: 12 }}>
+          <div className="flex items-start gap-3 flex-wrap"><div><Label color={RISK_COLOR[P.risk] || C.dim}>{A.subsystem.replace('_', ' & ')} · {A.kind}</Label><div style={{ font: '600 15px ' + SANS, color: C.text, marginTop: 2 }}>{A.name} <span style={{ color: C.dim, font: '11px ' + MONO }}>{A.id}</span></div><div style={{ font: '10.5px ' + MONO, color: C.mute }}>serves {A.serves}{A.failure_mode ? ' · watched failure mode: ' + A.failure_mode : ''}</div></div>
+            {P.risk && <div className="ml-auto grid gap-2" style={{ gridTemplateColumns: 'repeat(4, auto)' }}>{[['Risk', (A.state === 'maintenance' ? 'maintenance' : P.risk), RISK_COLOR[P.risk]], ['RUL', rulTxt(P), C.text], ['90% band', P.rul_lo_s != null ? Math.round(P.rul_lo_s) + '–' + (P.rul_hi_s != null ? Math.round(P.rul_hi_s) : '∞') + ' s' : '—', C.text], ['P(fail 15m)', P.p_fail_15m != null ? Math.round(P.p_fail_15m * 100) + '%' : '—', P.p_fail_15m > 0.5 ? C.red : C.text]].map(([k, v, c]) => <div key={k} className="px-2.5 py-1.5 rounded" style={{ background: C.p2, border: '1px solid ' + C.line }}><Label>{k}</Label><div style={{ font: '500 13px ' + MONO, color: c, marginTop: 2, whiteSpace: 'nowrap' }}>{v}</div></div>)}</div>}
+          </div>
+          {SIG_KINDS.includes(A.kind) ? <><EChart option={hiOpt} height={190} /><div style={{ font: '10px/1.5 ' + MONO, color: C.dim }}>{P.signal ? 'signal: ' + P.signal + ' ' + P.value + ' ' + P.unit + ' (alarm ' + P.alarm + ') · ' : ''}{P.model || ''} · the predictor sees only these noisy sensor readings</div></>
+            : <div style={{ font: '11px ' + SANS, color: C.mute, marginTop: 8 }}>Monitored, not trend-predicted (no wear-driven failure mode modelled for this asset type).</div>}
+          <div className="grid gap-x-4 gap-y-1 mt-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>{Object.entries(A.sensors || {}).map(([k, v]) => <div key={k} className="flex justify-between gap-2" style={{ font: '10.5px ' + MONO }}><span style={{ color: C.dim }}>{k.replace(/_/g, ' ')}</span><span style={{ color: C.text }}>{String(v)}</span></div>)}</div>
+        </Panel>
+        <div className="grid gap-3" style={{ gridTemplateColumns: narrow ? '1fr' : '1fr 1fr' }}>
+          <Panel style={{ padding: 10 }}><Label color="#7aa2ff">Energy agent · battery dispatch</Label><EChart option={energyOpt} height={150} />
+            <div style={{ font: '10px/1.5 ' + MONO, color: C.mute }}>mode <b style={{ color: C.text }}>{tw.bess.mode.replace('_', ' ')}</b> · SoC {Math.round(tw.bess.soc * 100)}% · net savings {fmt$(tw.bess.saved_usd)} · peak window {tw.peak_window[0]}:00–{tw.peak_window[1]}:00 · autonomous within a 40% SoC reserve</div></Panel>
+          <Panel style={{ padding: 10 }}><Label color={C.red}>Security watcher</Label>
+            <div className="mt-1.5 flex flex-col gap-1.5 overflow-auto" style={{ maxHeight: 170 }}>{tw.security.length ? tw.security.slice().reverse().map((e, i) => <div key={i} className="p-2 rounded" style={{ background: 'rgba(255,89,110,.05)', border: '1px solid rgba(255,89,110,.25)' }}>
+              <div style={{ font: '600 11px ' + SANS, color: C.text }}>{e.kind === 'badge' ? 'Access anomaly' : 'Firmware change attempt'} · {e.where}</div><div style={{ font: '10px/1.45 ' + MONO, color: C.mute }}>{e.who} · {e.detail}</div><div style={{ font: '9.5px ' + MONO, color: C.amber, marginTop: 2 }}>escalated to human · agents may not act on access or firmware</div></div>)
+              : <div style={{ font: '11px ' + SANS, color: C.mute }}>No anomalies. Badge events, door states and management-plane firmware changes are watched continuously; anything unusual goes straight to a human.</div>}</div></Panel>
+        </div>
+      </div>
+      <div className="flex flex-col gap-3 min-h-0 overflow-auto">
+        <Panel style={{ padding: 10 }}><Label color={C.mint}>Predictive work orders</Label>
+          <div className="flex flex-col gap-1 mt-1.5">{wos.length ? wos.slice(0, 6).map(w => <button key={w.id} onClick={() => setWoSel(w.id)} className="text-left px-2 py-1.5 rounded-md" style={{ background: wo && wo.id === w.id ? 'rgba(79,224,165,.07)' : 'transparent', border: '1px solid ' + (wo && wo.id === w.id ? 'rgba(79,224,165,.35)' : C.line) }}>
+            <div className="flex justify-between"><span style={{ font: '600 11px ' + MONO, color: C.text }}>{w.id} · {w.asset}</span><span style={{ font: '9.5px ' + MONO, color: ['CLOSED', 'VERIFIED'].includes(w.state) ? C.mint : ['FAILED', 'REJECTED'].includes(w.state) ? C.red : C.cyan }}>{w.state.replace(/_/g, ' ')}</span></div>
+            <div style={{ font: '9.5px ' + MONO, color: C.dim }}>{w.failure_mode} · predicted RUL {w.prediction && w.prediction.rul_s != null ? Math.round(w.prediction.rul_s) + 's' : '—'}{w.outcome ? ' · ' + (w.outcome.prevented ? 'incident prevented' : 'peak ' + w.outcome.observed_peak_gpu_c + '°C') : ''}</div></button>)
+            : <div style={{ font: '11px/1.5 ' + SANS, color: C.mute }}>No predicted failures. Try Demo ▾ → "Predictive: C02 bearing wear".</div>}</div></Panel>
+        {wo && <Panel style={{ padding: 12 }}>
+          <div className="flex justify-between items-baseline"><span style={{ font: '600 13px ' + SANS, color: C.text }}>{wo.id} · {wo.asset_name}</span><span style={{ font: '10px ' + MONO, color: C.cyan }}>{wo.state.replace(/_/g, ' ')}</span></div>
+          <div style={{ font: '10.5px/1.5 ' + MONO, color: C.mute, marginTop: 2 }}>{wo.failure_mode}: {wo.prediction.signal} {wo.prediction.value} {wo.prediction.unit} · RUL {Math.round(wo.prediction.rul_s || 0)}s (90% {Math.round(wo.prediction.rul_lo_s || 0)}–{wo.prediction.rul_hi_s ? Math.round(wo.prediction.rul_hi_s) : '∞'}s) at prediction</div>
+          {['PLANNING'].includes(wo.state) && <div className="mt-2 animate-pulse" style={{ font: '11px ' + MONO, color: C.cyan }}>CREAO Reliability Agent is evaluating preventive options… {(wo.options || []).length} evaluated</div>}
+          {wo.agent_error && <div className="mt-2" style={{ font: '11px ' + SANS, color: C.amber }}>{wo.agent_error}</div>}
+          {plan && <div className="mt-2.5 flex flex-col gap-2">
+            <div className="flex justify-between"><Label color={C.cyan}>Preventive plan v{plan.version}</Label><span style={{ font: '9.5px ' + MONO, color: C.dim }}>{plan.author} · {plan.status.replace('_', ' ')}</span></div>
+            <div className="flex flex-col gap-0.5">{plan.actions.length ? plan.actions.map((a, i) => <div key={i} style={{ font: '11px ' + MONO, color: C.text }}>› {actionText(a)}</div>) : <div style={{ font: '11px ' + MONO, color: C.mute }}>› no pre-positioning needed</div>}
+              <div style={{ font: '11px ' + MONO, color: C.text }}>› take {wo.asset} out of service at t+{plan.maintenance_start_in_s}s for {plan.maintenance_duration_s}s (bearing replacement)</div></div>
+            <div className="grid grid-cols-2 gap-1.5">{[['Peak if nothing', plan.evaluation.counterfactual.peak_gpu_c + '°C', plan.evaluation.counterfactual.peak_gpu_c >= 88 ? C.red : C.text], ['Peak with plan', plan.evaluation.with_plan.peak_gpu_c + '°C', plan.evaluation.meets_goal ? C.mint : C.amber], ['Cost', fmt$(plan.evaluation.incremental_cost_usd), C.text], ['SLA exposure avoided', fmt$(plan.evaluation.avoided_exposure_usd), C.mint], ['Policy', plan.evaluation.policy.decision.replace('_', ' '), C.amber], ['Confidence', plan.confidence != null ? plan.confidence : '—', C.text]].map(([k, v, c]) => <div key={k} className="px-2 py-1.5 rounded" style={{ background: C.p2, border: '1px solid ' + C.line }}><Label>{k}</Label><div style={{ font: '500 12px ' + MONO, color: c, marginTop: 2 }}>{v}</div></div>)}</div>
+            <EChart option={cmpOpt} height={130} />
+            {plan.reasoning_summary && <div className="p-2.5 rounded" style={{ background: 'rgba(67,217,245,.05)', border: '1px solid rgba(67,217,245,.18)', font: '11px/1.5 ' + SANS, color: '#c7d6e6' }}><Label color={C.cyan}>CREAO reasoning</Label><div className="mt-1">{plan.reasoning_summary}</div></div>}
+            {wo.state === 'AWAITING_APPROVAL' && <div className="flex gap-2 flex-wrap"><Btn tone="mint" disabled={busy} onClick={() => act('/api/maintenance/' + wo.id + '/approve', { version: plan.version })}>Approve v{plan.version} · schedule</Btn><Btn tone="danger" disabled={busy} onClick={() => act('/api/maintenance/' + wo.id + '/reject', { reason: 'rejected from console' })}>Reject</Btn></div>}
+          </div>}
+          {['AWAITING_PLAN', 'AGENT_UNAVAILABLE', 'REPLAN', 'PREDICTED'].includes(wo.state) && <div className="mt-2"><Btn small disabled={busy} onClick={() => act('/api/maintenance/' + wo.id + '/plan', {})}>Run CREAO Reliability Agent</Btn></div>}
+          {wo.outcome && <div className="mt-2 p-2.5 rounded" style={{ background: wo.outcome.prevented ? 'rgba(79,224,165,.08)' : 'rgba(255,187,85,.07)', border: '1px solid ' + (wo.outcome.prevented ? 'rgba(79,224,165,.4)' : 'rgba(255,187,85,.35)') }}>
+            <Label color={wo.outcome.prevented ? C.mint : C.amber}>{wo.outcome.prevented ? 'Incident prevented' : 'Outcome'}</Label>
+            <div style={{ font: '11px/1.55 ' + MONO, color: C.text, marginTop: 3 }}>observed peak {wo.outcome.observed_peak_gpu_c}°C ({wo.outcome.hottest_rack}) vs {wo.outcome.counterfactual_peak_gpu_c}°C forecast without action · breaches {wo.outcome.breaches.length} · exposure avoided {fmt$(wo.outcome.avoided_exposure_usd)}</div></div>}
+          <div className="mt-2 flex flex-col gap-0.5">{(wo.timeline || []).slice(-6).map((t, i) => <div key={i} className="truncate" style={{ font: '9.5px ' + MONO, color: C.dim }} title={t.reason}>t+{Math.round(t.sim_t)}s · {t.state.replace(/_/g, ' ')} · {t.reason}</div>)}</div>
+        </Panel>}
+        <Panel style={{ padding: 10 }}><Label>Prediction proof</Label>
+          <div className="grid grid-cols-2 gap-1.5 mt-1.5">{[['RUL error (MAE)', proof.rul_mae_s != null ? Math.round(proof.rul_mae_s) + ' s' : '—'], ['Within ±25%', proof.within_25pct != null ? proof.within_25pct + '%' : '—'], ['Mean lead time', proof.mean_lead_time_s != null ? Math.round(proof.mean_lead_time_s) + ' s' : '—'], ['Prevented / predicted', (proof.prevented || 0) + ' / ' + (proof.failures_predicted || 0)]].map(([k, v]) => <div key={k} className="px-2 py-1.5 rounded" style={{ background: C.p2, border: '1px solid ' + C.line }}><Label>{k}</Label><div style={{ font: '500 12px ' + MONO, color: C.text, marginTop: 2 }}>{v}</div></div>)}</div>
+          <div style={{ font: '9.5px/1.5 ' + SANS, color: C.dim, marginTop: 6 }}>{proof.note} {proof.predictions_scored || 0} predictions scored.</div></Panel>
+      </div>
+    </div>
+  </div>;
+}
+const SIG_KINDS = ['crah', 'ups', 'bess', 'chiller', 'pdu'];
 
 function ControlRoom({ g, setModal, toast, narrow }) {
   const [opts, setOpts] = React.useState({ mode: 'combined', density: 0.7, intensity: 1, paused: false, labels: false });
@@ -764,46 +891,165 @@ function SpecialistsPanel({ g, inc }) {
   </Panel>;
 }
 
+const KIND_META = {
+  signal: ['SIGNAL', '#9fd8ec', 'M2 12h3l2-5 3 10 3-7 2 2h5'], detector: ['DETECT', '#4FE0A5', 'M12 3a9 9 0 1 0 9 9M12 7a5 5 0 1 0 5 5M12 12l6-6'],
+  agent: ['CREAO AGENT', '#43D9F5', 'M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z'], specialist: ['CREAO SPECIALIST', '#b49cff', 'M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4zM19 3v4M17 5h4'],
+  option: ['OPTION', '#8A9BB0', 'M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9c0 6-12 3-12 6'], plan: ['PLAN · POLICY', '#FFBB55', 'M7 3h7l5 5v13H7zM14 3v5h5M10 13h6M10 17h6'],
+  human: ['HUMAN', '#FFBB55', 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0'], voice: ['VOICE · CARTESIA', '#b49cff', 'M5 4h4l2 5-3 2a11 11 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2'],
+  action: ['ACT', '#43D9F5', 'M13 2L4 14h7l-1 8 9-12h-7z'], verify: ['VERIFY', '#4FE0A5', 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM8.5 12l2.5 2.5 4.5-5'], close: ['CLOSE', '#4FE0A5', 'M5 21V4M5 4h11l-2 4 2 4H5'],
+};
+const ST_RING = { done: '#4FE0A5', active: '#43D9F5', failed: '#FF596E', skipped: '#56677C' };
+function Glyph({ d, color, size = 13 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>; }
+
+function TraceNode({ data, selected }) {
+  const n = data.n; const km = KIND_META[n.kind] || KIND_META.signal; const ring = ST_RING[n.status] || C.line2;
+  const chosen = n.tag === 'chosen'; const isOpt = n.kind === 'option';
+  return <div className={'gp-tn' + (n.current ? ' gp-cur' : '') + (n.status === 'active' ? ' gp-act' : '')} style={{ animationDelay: (data.delay || 0) + 'ms', width: isOpt ? 196 : 224, background: isOpt ? 'rgba(16,24,38,.92)' : C.p2,
+    border: '1px solid ' + (selected ? C.cyan : chosen ? 'rgba(79,224,165,.7)' : n.status === 'failed' ? 'rgba(255,89,110,.55)' : C.line2), borderRadius: 10, padding: '8px 10px', color: C.text, boxShadow: chosen ? '0 0 0 3px rgba(79,224,165,.12)' : 'none' }}>
+    <Handle type="target" position={Position.Left} style={{ opacity: 0, width: 6, height: 6 }} />
+    <Handle type="target" id="t" position={Position.Top} style={{ opacity: 0, width: 6, height: 6 }} />
+    <div className="flex items-center gap-1.5"><Glyph d={km[2]} color={km[1]} /><span style={{ font: '600 8.5px ' + MONO, letterSpacing: '.14em', color: km[1] }}>{km[0]}</span>
+      {chosen && <span style={{ font: '600 8.5px ' + MONO, color: C.mint, letterSpacing: '.1em' }}>· CHOSEN</span>}
+      <span className="ml-auto" style={{ width: 7, height: 7, borderRadius: 7, background: n.status === 'skipped' ? 'transparent' : ring, border: '1.5px solid ' + ring }} /></div>
+    <div style={{ font: '600 11.5px/1.3 ' + SANS, marginTop: 4, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{n.title}</div>
+    {n.sub && <div style={{ font: '10px/1.35 ' + MONO, color: C.mute, marginTop: 2, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{n.sub}</div>}
+    {Object.keys(n.metrics || {}).length > 0 && <div className="flex flex-wrap gap-1 mt-1.5">{Object.entries(n.metrics).filter(([, v]) => v != null && v !== '').slice(0, 4).map(([k, v]) => <span key={k} style={{ font: '9px ' + MONO, color: '#a9bbcf', background: 'rgba(255,255,255,.035)', border: '1px solid ' + C.line, borderRadius: 4, padding: '0 4px', whiteSpace: 'nowrap' }}>{k} <b style={{ color: C.text, fontWeight: 500 }}>{String(v)}</b></span>)}</div>}
+    <Handle type="source" position={Position.Right} style={{ opacity: 0, width: 6, height: 6 }} />
+    <Handle type="source" id="b" position={Position.Bottom} style={{ opacity: 0, width: 6, height: 6 }} />
+  </div>;
+}
+function FlowEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, markerEnd }) {
+  const [path] = getSmoothStepPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, borderRadius: 12 });
+  const color = data.tone === 'failed' ? C.red : data.tone === 'chosen' ? C.mint : data.tone === 'option' ? 'rgba(138,155,176,.45)' : data.tone === 'active' ? C.cyan : 'rgba(79,224,165,.55)';
+  return <>
+    <BaseEdge id={id} path={path} markerEnd={markerEnd} style={{ stroke: color, strokeWidth: data.tone === 'option' ? 1 : 1.6, strokeDasharray: data.tone === 'option' || data.tone === 'chosen' ? '4 4' : undefined }} />
+    {data.flow && !data.reduced && <circle r="3" fill={data.tone === 'active' ? C.cyan : C.mint} style={{ filter: 'drop-shadow(0 0 4px ' + C.cyan + ')' }}><animateMotion dur={data.tone === 'active' ? '1.4s' : '2.6s'} repeatCount="indefinite" path={path} /></circle>}
+  </>;
+}
+const NODE_TYPES = { trace: TraceNode }; const EDGE_TYPES = { flow: FlowEdge };
+
+function TraceGraph({ trace, onSelect, selId }) {
+  const seen = React.useRef({}); const first = React.useRef(true);
+  const reduced = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const { nodes, edges } = React.useMemo(() => {
+    if (!trace) return { nodes: [], edges: [] };
+    const byId = Object.fromEntries(trace.nodes.map(n => [n.id, n]));
+    const parentOf = {}; trace.edges.forEach(e => { if (e.kind === 'option') parentOf[e.target] = e.source; });
+    const kids = {}; const pos = {};
+    trace.nodes.forEach(n => { if (!n.row) pos[n.id] = { x: (n.col || 0) * 262, y: 0 }; });
+    trace.nodes.forEach(n => { if (n.row) { const p = parentOf[n.id]; const i = (kids[p] = (kids[p] || 0) + 1) - 1; const px = (pos[p] || { x: (n.col || 0) * 262 }).x; pos[n.id] = { x: px + ((i % 5) - 2) * 210, y: 150 + Math.floor(i / 5) * 128 }; } });
+    const nodes = trace.nodes.map(n => { const isNew = !seen.current[n.id]; const delay = isNew && first.current ? (n.row ? 600 + (kids[parentOf[n.id]] ? 0 : 0) + (n.col || 0) * 60 : (n.col || 0) * 120) : 0; seen.current[n.id] = 1;
+      return { id: n.id, type: 'trace', position: pos[n.id] || { x: 0, y: 0 }, data: { n, delay }, selected: n.id === selId, draggable: false }; });
+    first.current = false;
+    const edges = trace.edges.filter(e => byId[e.source] && byId[e.target]).map((e, i) => { const t = byId[e.target]; const tone = e.kind === 'option' ? 'option' : e.kind === 'chosen' ? 'chosen' : t.status === 'failed' ? 'failed' : t.status === 'active' ? 'active' : 'done';
+      return { id: 'e' + i + e.source + e.target, source: e.source, target: e.target, type: 'flow', sourceHandle: e.kind === 'option' ? 'b' : undefined, targetHandle: e.kind === 'option' ? 't' : undefined,
+        data: { tone, flow: e.kind === 'flow' || e.kind === 'chosen', reduced }, markerEnd: e.kind === 'option' ? undefined : { type: MarkerType.ArrowClosed, width: 14, height: 14, color: tone === 'failed' ? C.red : tone === 'active' ? C.cyan : C.mint } }; });
+    return { nodes, edges };
+  }, [trace, selId]);
+  React.useEffect(() => { seen.current = {}; first.current = true; }, [trace && trace.id]);
+  if (!trace) return <div className="flex-1 flex items-center justify-center" style={{ color: C.mute, font: '12px ' + SANS }}>Loading decision trace…</div>;
+  if (!trace.nodes.length) return <div className="flex-1 flex items-center justify-center" style={{ color: C.mute, font: '12px ' + SANS }}>No steps recorded for this loop yet.</div>;
+  return <div className="flex-1 min-h-0" style={{ position: 'relative' }} onWheel={e => e.stopPropagation()}>
+    <ReactFlow key={trace.kind + trace.id} nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} fitView fitViewOptions={{ padding: 0.18, maxZoom: 1.05 }} minZoom={0.25} maxZoom={1.6}
+      colorMode="dark" proOptions={{ hideAttribution: true }} nodesConnectable={false} onNodeClick={(_, n) => onSelect(n.data.n)} onPaneClick={() => onSelect(null)} style={{ background: 'transparent' }}>
+      <Background color="rgba(110,150,190,.13)" gap={22} size={1} />
+      <Controls showInteractive={false} position="bottom-right" />
+    </ReactFlow>
+  </div>;
+}
+
+function Kpi({ label, value, sub, tone }) {
+  return <div className="px-3 py-2 rounded-lg" style={{ background: C.p1, border: '1px solid ' + C.line, minWidth: 0 }}>
+    <div style={{ font: '600 8.5px ' + MONO, letterSpacing: '.14em', color: C.dim, textTransform: 'uppercase', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</div>
+    <div style={{ font: '500 19px ' + MONO, color: tone || C.text, marginTop: 2, letterSpacing: '-.02em', whiteSpace: 'nowrap' }}>{value == null ? '—' : value}</div>
+    <div style={{ font: '9.5px ' + MONO, color: C.dim, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={sub}>{sub}</div>
+  </div>;
+}
+const LOOP_COLOR = { Remediation: '#43D9F5', Reliability: '#4FE0A5', Finance: '#FFBB55', Energy: '#7aa2ff', Security: '#FF596E', Human: '#b49cff', All: '#8A9BB0' };
+const LOOPS_INFO = [
+  ['Remediation', 'thermal + capacity incidents', 'detector → CREAO plan → policy → human → git execute → recovery'],
+  ['Reliability', 'predictive maintenance', 'sensor trends → RUL → CREAO preventive plan → approve → maintain → verify'],
+  ['Finance', 'AP analyst · cost controller', 'invoices → 3-way match → CREAO review → controller → payment'],
+  ['Energy', 'battery storage dispatch', 'tariff + load → BESS peak shaving within SoC reserve (autonomous)'],
+  ['Security', 'access + firmware', 'anomaly → escalate to human (no autonomous action)'],
+];
+
 function AgentOps({ g, narrow }) {
-  const st = g.state; const inc = st && st.incident; const evs = (st && st.events) || [];
-  const [selE, setSelE] = React.useState(null);
-  const runs = (inc && inc.agent_runs) || []; const calls = (inc && inc.calls) || []; const tools = (inc && inc.tool_calls) || [];
-  const it = st && st.integrations;
-  const graphTypes = ['state_transition', 'creao_run_started', 'creao_run_completed', 'creao_run_failed', 'creao_disconnected', 'creao_run_failed_to_start', 'agent_tool_call', 'voice_tool_call', 'call_started', 'call_failed', 'call_not_placed', 'call_status', 'operator_suggestion', 'approval_code_issued', 'usage_metered', 'invoice_reconciled', 'fault_injected', 'agent_report', 'demo_injection', 'specialist_requested', 'specialist_completed', 'specialist_recommendation_evaluated', 'creao_agent_creation_started', 'creao_agent_created', 'creao_agent_creation_failed', 'creao_agent_pending', 'specialist_unavailable', 'specialist_refused', 'specialist_timeout', 'agent_tool_refused'];
-  const graph = evs.filter(e => graphTypes.includes(e.type) && (!inc || e.incident_id === inc.id || !e.incident_id)).slice(0, 120);
-  const ev = graph.find(e => e.id === selE) || graph[0];
-  const toolFor = ev && (ev.type === 'agent_tool_call' || ev.type === 'voice_tool_call') ? tools.filter(t => t.tool === ev.data.tool && Math.abs(t.ts - ev.ts) < 3).slice(-1)[0] : null;
-  const plan = inc && inc.plans && inc.plans.slice(-1)[0]; const exec = inc && inc.executions && inc.executions.slice(-1)[0];
-  const appr = inc && inc.approvals && inc.approvals.filter(a => a.status === 'approved').slice(-1)[0];
-  const agent = (name, role, status, detail, ok) => <Panel style={{ padding: 10 }}><div className="flex justify-between items-start gap-2"><span style={{ font: '600 12px/1.35 ' + SANS, color: C.text }}>{name}</span><span className="gp-nw" style={{ font: '600 9.5px/1.6 ' + MONO, color: ok ? C.mint : ok === false ? C.red : C.amber }}>{status}</span></div><div style={{ font: '10px/1.45 ' + MONO, color: C.dim, marginTop: 2 }}>{role}</div><div style={{ font: '10.5px/1.5 ' + MONO, color: C.mute, marginTop: 4, overflowWrap: 'anywhere' }}>{detail}</div></Panel>;
-  const lr = runs.slice(-1)[0]; const lc = calls.slice(-1)[0];
-  return <div className={'flex-1 min-h-0 grid gap-3 p-3' + (narrow ? ' overflow-auto' : '')} style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(230px,.9fr) minmax(300px,1.3fr) minmax(300px,1.2fr)', gridAutoRows: narrow ? 'max-content' : undefined, background: C.bg }}>
-    <div className="flex flex-col gap-2 overflow-auto">
-      <Label>Active agents</Label>
-      {agent('CREAO Remediation Agent', 'diagnosis · planning · finance reasoning · replanning · summaries', lr ? lr.status : (it && (it.creao.app_id_set || (it.creao_cli && it.creao_cli.available)) ? 'idle' : 'not connected'), lr ? lr.task + (lr.provider_run_id ? ' · run ' + lr.provider_run_id : '') + ' · ' + ago(lr.created) : 'one CREAO agent, invoked per task with a scoped tool token', lr ? lr.status === 'completed' : null)}
-      <SpecialistsPanel g={g} inc={inc} />
-      {agent('Finance engine', 'deterministic forecasts, rate cards, reconciliation', 'running', 'All arithmetic in backend code; CREAO explains and compares.', true)}
-      {(() => { const opOk = it && it.cartesia.operator && it.cartesia.operator.consent; const stale = lc && lc.status === 'failed' && opOk && /operator/i.test(lc.data.error || ''); const useLc = lc && !stale;
-        return agent('Cartesia Voice Operator', 'outbound call · Q&A · alternatives · approval intent', useLc ? lc.status : (it && it.cartesia.agent_id ? (opOk ? 'ready' : 'needs operator') : 'not set up'), useLc ? (lc.data.agent_call_id || lc.data.error || '') : (opOk ? 'Calls ' + it.cartesia.operator.name + ' ' + it.cartesia.operator.phone_masked + ' from +1 618-427-8064 when a plan needs approval' : 'Register the operator phone in Connections'), useLc ? lc.status !== 'failed' : (opOk ? true : null)); })()}
-      {agent('Policy engine', 'deterministic authorization', 'enforcing', plan ? plan.plan_id + ' v' + plan.version + ': ' + plan.policy.decision : 'auto · approval · forbidden tiers', true)}
-      {agent('Config executor', 'git config store · validation · rollback', exec ? exec.state : 'idle', exec ? (exec.data.applied_sha || '').slice(0, 10) + ' ' + (exec.data.rollback ? 'rolled back → ' + exec.data.rollback.sha.slice(0, 10) : '') : 'isolated worktrees, snapshots before apply', exec ? exec.state !== 'rolled_back' : null)}
-      <Panel style={{ padding: 10 }}><Label color={C.cyan}>System evidence</Label>
-        <div style={{ font: '10.5px/1.6 ' + SANS, color: C.mute, marginTop: 4 }}><div style={{ color: C.amber, font: '600 9.5px ' + MONO, letterSpacing: '.12em' }}>SIMULATED</div>{st && st.evidence.simulated.map(x => <div key={x}>· {x}</div>)}<div style={{ color: C.mint, font: '600 9.5px ' + MONO, letterSpacing: '.12em', marginTop: 6 }}>REAL</div>{st && st.evidence.real.map(x => <div key={x}>· {x}</div>)}</div></Panel>
+  const st = g.state; const S_ = st && st.agent_summary; const K = (S_ && S_.kpis) || {}; const loops = (st && st.loops) || [];
+  const [loopSel, setLoopSel] = React.useState(null); const [trace, setTrace] = React.useState(null); const [node, setNode] = React.useState(null);
+  const sel = loopSel || (loops.find(l => l.active) || loops[0] || null);
+  const selKey = sel ? sel.kind + '/' + sel.id : null;
+  const evHead = st && st.events && st.events[0] && st.events[0].id;
+  React.useEffect(() => { setNode(null); setTrace(null); }, [selKey]);
+  React.useEffect(() => { if (!selKey) return; let dead = false; g.api('/api/trace/' + selKey).then(t => { if (!dead) setTrace(t); }).catch(() => { }); return () => { dead = true; }; }, [selKey, evHead]);
+  const evs = ((st && st.events) || []).filter(e => !['duplicate_telemetry_suppressed'].includes(e.type)).slice(0, 60);
+  const inc = st && st.incident;
+  const mtp = K.mean_time_to_plan_s;
+  return <div className={'flex-1 min-h-0 flex flex-col' + (narrow ? ' overflow-auto' : '')} style={{ background: C.bg }}>
+    <link rel="stylesheet" href="https://esm.sh/@xyflow/react@12/dist/style.css" />
+    <style>{'.gp-tn{animation:gpIn .55s cubic-bezier(.2,.8,.2,1) both}@keyframes gpIn{from{opacity:0;transform:translateY(8px) scale(.97)}to{opacity:1;transform:none}}.gp-cur{animation:gpIn .55s both,gpPulse 2.2s ease-in-out infinite}@keyframes gpPulse{0%,100%{box-shadow:0 0 0 1px rgba(67,217,245,.9),0 0 22px rgba(67,217,245,.35)}50%{box-shadow:0 0 0 1px rgba(67,217,245,.5),0 0 6px rgba(67,217,245,.12)}}.gp-dot-live{animation:gpBlink 1.4s ease-in-out infinite}@keyframes gpBlink{50%{opacity:.35}}@media (prefers-reduced-motion: reduce){.gp-tn,.gp-cur,.gp-dot-live{animation:none!important}}.react-flow__controls button{background:#141E2D;border-color:rgba(110,150,190,.28);fill:#8A9BB0}.react-flow__controls button:hover{background:#1b2738}'}</style>
+    <div className="px-3 pt-3 grid gap-2 overflow-x-auto" style={{ gridAutoFlow: 'column', gridAutoColumns: 'minmax(132px, 1fr)', scrollbarWidth: 'thin' }}>
+      <Kpi label="CREAO runs" value={K.creao_runs} sub={(K.creao_completed || 0) + ' completed · ' + (K.creao_active || 0) + ' active · ' + (K.creao_failed || 0) + ' failed'} tone={C.cyan} />
+      <Kpi label="Tool calls" value={K.tool_calls} sub={(K.tool_ok_pct != null ? K.tool_ok_pct + '% ok' : '') + ' · every call audited'} />
+      <Kpi label="Autonomous actions" value={(K.auto_executed || 0) + (K.bess_dispatches || 0)} sub={(K.auto_executed || 0) + ' plans · ' + (K.bess_dispatches || 0) + ' BESS dispatches'} tone={C.mint} />
+      <Kpi label="Human approvals" value={(K.human_approved || 0) + (K.controller_signoffs || 0)} sub={(K.human_approved || 0) + ' plans · ' + (K.controller_signoffs || 0) + ' controller'} tone={C.amber} />
+      <Kpi label="Blocked by policy" value={K.policy_blocks} sub={'rollbacks ' + (K.rollbacks || 0)} tone={K.policy_blocks ? C.red : undefined} />
+      <Kpi label="Time to plan" value={mtp != null ? (mtp >= 60 ? Math.floor(mtp / 60) + 'm ' + (mtp % 60) + 's' : mtp + 's') : null} sub={'detect → CREAO plan · ' + (K.incidents || 0) + ' incidents'} />
+      <Kpi label="Failures predicted" value={K.failures_predicted} sub={(K.prevented || 0) + ' prevented · lead ' + (K.mean_lead_time_s != null ? Math.round(K.mean_lead_time_s) + 's' : '—')} tone={C.mint} />
+      <Kpi label="Finance agreement" value={K.agent_finance_agreement} sub="CREAO vs deterministic matcher" />
+      <Kpi label="BESS net savings" value={K.bess_saved_usd != null ? fmt$(K.bess_saved_usd) : null} sub="vs no battery, simulated tariff" />
     </div>
-    <div className="flex flex-col min-h-0"><Label>Execution graph (newest first)</Label>
-      <div className="overflow-auto mt-2 flex-1">{graph.map((e, i) => <button key={e.id} onClick={() => setSelE(e.id)} className="w-full text-left flex gap-2.5 items-start" style={{ padding: '5px 6px', borderRadius: 6, background: ev && ev.id === e.id ? 'rgba(67,217,245,.07)' : 'transparent' }}>
-        <span style={{ marginTop: 5, width: 7, height: 7, borderRadius: 7, flexShrink: 0, background: e.type.includes('fail') || e.type.includes('not_placed') || (e.data.to && ['ROLLING_BACK', 'REPLAN', 'DENIED'].includes(e.data.to)) ? C.red : e.actor.startsWith('creao') ? C.cyan : e.actor.startsWith('cartesia') || e.actor.includes('voice') ? '#b49cff' : e.actor.startsWith('operator') ? C.amber : C.mint }} />
-        <div className="min-w-0"><div style={{ font: '500 11.5px ' + SANS, color: C.text }}>{e.type === 'state_transition' ? e.data.from + ' → ' + e.data.to : e.type === 'agent_tool_call' || e.type === 'voice_tool_call' ? e.actor.split(':')[0] + ' called ' + e.data.tool : e.type.replace(/_/g, ' ')}</div>
-          <div className="truncate" style={{ font: '10px ' + MONO, color: C.dim }}>t+{Math.round(e.sim_t)}s · {e.actor}{e.data.reason ? ' · ' + e.data.reason : ''}</div></div></button>)}
-        {!graph.length && <div style={{ font: '11.5px ' + SANS, color: C.mute }}>No operations yet.</div>}</div></div>
-    <div className="flex flex-col min-h-0"><Label>Evidence inspector</Label>
-      <Panel className="mt-2 overflow-auto flex-1" style={{ padding: 12 }}>{ev ? <div className="flex flex-col gap-2" style={{ font: '11px/1.55 ' + MONO, color: C.text }}>
-        {[['Incident', ev.incident_id || '—'], ['Event', ev.type + ' #' + ev.id], ['Actor', ev.actor], ['Timestamp', new Date(ev.ts * 1000).toLocaleString() + ' · sim t+' + ev.sim_t + 's'], ['Agent run', (ev.actor.startsWith('creao:') ? ev.actor.slice(6) : ev.data.creao_run_id || ev.data.run_ref || '—')], ['Plan', plan ? plan.plan_id + ' v' + plan.version : '—'], ['Approval identity', appr ? (appr.data.actor + ' via ' + appr.data.channel) : '—']].map(([k, v]) => <div key={k} className="grid" style={{ gridTemplateColumns: '120px 1fr' }}><span style={{ color: C.dim }}>{k}</span><span className="break-all">{v}</span></div>)}
-        {toolFor && <><Label>Tool call input</Label><pre style={{ whiteSpace: 'pre-wrap', color: '#a9c3d9', margin: 0 }}>{JSON.stringify(toolFor.args, null, 1)}</pre><Label>Tool result</Label><pre style={{ whiteSpace: 'pre-wrap', color: '#9fb0c4', margin: 0, maxHeight: 220, overflow: 'auto' }}>{JSON.stringify(toolFor.result, null, 1)}</pre></>}
-        <Label>Event data</Label><pre style={{ whiteSpace: 'pre-wrap', color: '#9fb0c4', margin: 0 }}>{JSON.stringify(ev.data, null, 1)}</pre>
-        {exec && <><Label>Config diff ({exec.id})</Label><Diff text={exec.data.diff} />{exec.data.validation && <><Label>Validation output</Label>{exec.data.validation.map(c => <div key={c.name} style={{ color: c.ok ? C.mint : C.red }}>{c.ok ? '✓' : '✗'} {c.name}: {c.detail}</div>)}</>}</>}
-        {runs.length > 0 && <><Label>CREAO runs</Label>{runs.map(r => <div key={r.id} style={{ color: C.mute }}>{r.id} · {r.task} · {r.status} · {r.provider_run_id || 'no provider id'}{r.data && r.data.structured_errors && r.data.structured_errors.length ? ' · output issues: ' + r.data.structured_errors.join(', ') : ''}</div>)}</>}
-      </div> : <div style={{ color: C.mute, font: '11.5px ' + SANS }}>Select an operation.</div>}</Panel></div>
+    <div className="px-3 pt-2 flex items-center gap-1.5 overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
+      <span style={{ font: '600 9px ' + MONO, letterSpacing: '.14em', color: C.dim, marginRight: 4, whiteSpace: 'nowrap' }}>DECISION TRACES</span>
+      {loops.map(l => { const on = sel && l.kind === sel.kind && l.id === sel.id; const lc = LOOP_COLOR[l.loop];
+        return <button key={l.kind + l.id} onClick={() => setLoopSel(l)} className="flex items-center gap-1.5 rounded-full" style={{ padding: '4px 10px', border: '1px solid ' + (on ? lc : C.line), background: on ? lc + '18' : 'transparent', whiteSpace: 'nowrap' }}>
+          <span className={l.active ? 'gp-dot-live' : ''} style={{ width: 6, height: 6, borderRadius: 6, background: l.active ? lc : C.dim }} />
+          <span style={{ font: '600 10.5px ' + SANS, color: on ? C.text : C.mute }}>{l.title}</span><span style={{ font: '9.5px ' + MONO, color: C.dim }}>{String(l.state).toLowerCase().replace(/_/g, ' ')}</span></button>; })}
+    </div>
+    <div className="flex-1 min-h-0 grid gap-3 p-3" style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(230px, 270px) minmax(0, 1fr) minmax(250px, 300px)', gridAutoRows: narrow ? 'minmax(420px, auto)' : undefined }}>
+      <div className="flex flex-col gap-2 min-h-0 min-w-0 overflow-auto">
+        <Label>Agent roster</Label>
+        {((S_ && S_.roster) || []).map(a => { const active = /running|pending|queued|starting|creating|awaiting|in.?progress|dialing|ringing|peak|charge|alert/i.test(a.status); const lc = LOOP_COLOR[a.loop] || C.mute;
+          return <div key={a.name} className="px-2.5 py-2 rounded-lg" style={{ background: C.p1, border: '1px solid ' + C.line }}>
+            <div className="flex items-center gap-2"><span className={active ? 'gp-dot-live' : ''} style={{ width: 7, height: 7, borderRadius: 7, background: /fail|not connected|needs/i.test(a.status) ? C.red : active ? C.cyan : C.mint, flexShrink: 0 }} />
+              <span className="flex-1 min-w-0 truncate" style={{ font: '600 11.5px ' + SANS, color: C.text }}>{a.name}</span>
+              <span className="flex-shrink-0" style={{ font: '600 8.5px ' + MONO, letterSpacing: '.1em', color: a.kind === 'CREAO' ? C.cyan : a.kind === 'Cartesia' ? '#b49cff' : C.dim }}>{a.kind === 'deterministic' ? 'RULES' : a.kind.toUpperCase()}</span></div>
+            <div style={{ font: '10px/1.4 ' + MONO, color: C.dim, marginTop: 2 }}>{a.role}</div>
+            <div className="flex justify-between gap-2 mt-1" style={{ font: '10px ' + MONO }}><span style={{ color: lc }}>{a.loop}</span><span className="truncate" style={{ color: C.mute }}>{a.status}{a.count != null ? ' · ' + a.count : ''}{a.last ? ' · ' + ago(a.last) : ''}</span></div>
+          </div>; })}
+        <Panel style={{ padding: 10 }}><Label color={C.cyan}>Autonomous value loops</Label>
+          <div className="flex flex-col gap-1.5 mt-1.5">{LOOPS_INFO.map(([l, w, f]) => <div key={l}><div style={{ font: '600 10.5px ' + SANS, color: LOOP_COLOR[l] }}>{l} <span style={{ color: C.dim, fontWeight: 400 }}>· {w}</span></div><div style={{ font: '9.5px/1.4 ' + MONO, color: C.mute }}>{f}</div></div>)}</div>
+          <div style={{ font: '9.5px/1.45 ' + SANS, color: C.dim, marginTop: 6 }}>Humans keep strategic control: the policy engine decides what agents may do alone, and every consequential change waits for a verified person.</div></Panel>
+        {inc && <SpecialistsPanel g={g} inc={inc} />}
+      </div>
+      <div className="flex flex-col min-h-0 rounded-xl overflow-hidden" style={{ background: 'radial-gradient(ellipse at 30% 20%, rgba(67,217,245,.05), transparent 60%), ' + C.p1, border: '1px solid ' + C.line }}>
+        <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: '1px solid ' + C.line }}>
+          <span className="flex-shrink-0"><Label color={sel ? LOOP_COLOR[sel.loop] : C.dim}>{sel ? sel.loop + ' loop' : 'Decision trace'}</Label></span>
+          <span className="truncate min-w-0" style={{ font: '600 12px ' + SANS, color: C.text }}>{trace ? trace.title : ''}</span>
+          <span className="ml-auto flex items-center gap-3 flex-shrink-0" style={{ font: '9.5px ' + MONO, color: C.dim, whiteSpace: 'nowrap' }}>{[['done', C.mint], ['active', C.cyan], ['failed', C.red]].map(([l, c]) => <span key={l} className="flex items-center gap-1"><span style={{ width: 6, height: 6, borderRadius: 6, background: c }} />{l}</span>)}</span>
+        </div>
+        <TraceGraph trace={trace} onSelect={setNode} selId={node && node.id} />
+      </div>
+      <div className="flex flex-col gap-2 min-h-0">
+        <Panel className="overflow-auto" style={{ padding: 12, maxHeight: '55%' }}>
+          {node ? <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-1.5"><Glyph d={(KIND_META[node.kind] || KIND_META.signal)[2]} color={(KIND_META[node.kind] || KIND_META.signal)[1]} /><Label color={(KIND_META[node.kind] || KIND_META.signal)[1]}>{(KIND_META[node.kind] || KIND_META.signal)[0]}</Label><span className="ml-auto" style={{ font: '600 9.5px ' + MONO, color: ST_RING[node.status] }}>{node.status}</span></div>
+            <div style={{ font: '600 13px/1.35 ' + SANS, color: C.text }}>{node.title}</div>
+            {node.sub && <div style={{ font: '11px/1.45 ' + MONO, color: C.mute }}>{node.sub}</div>}
+            <div className="grid gap-1" style={{ gridTemplateColumns: '92px 1fr', font: '10.5px/1.5 ' + MONO }}>
+              {[['actor', node.actor], ['time', node.ts ? new Date(node.ts * 1000).toLocaleTimeString() : '—'], ...Object.entries(node.metrics || {})].filter(([, v]) => v != null && v !== '').map(([k, v]) => <React.Fragment key={k}><span style={{ color: C.dim }}>{k}</span><span className="break-all" style={{ color: C.text }}>{String(v)}</span></React.Fragment>)}
+            </div>
+            {node.detail && <div className="p-2.5 rounded" style={{ background: 'rgba(67,217,245,.05)', border: '1px solid rgba(67,217,245,.18)', font: '11px/1.55 ' + SANS, color: '#c7d6e6', whiteSpace: 'pre-wrap' }}>{node.detail}</div>}
+          </div> : <div style={{ font: '11.5px/1.55 ' + SANS, color: C.mute }}><Label>Inspector</Label><div className="mt-1.5">Click any step in the trace to see who acted, the evidence, the options considered and why one was chosen. Dashed branches are options the agent evaluated; the chosen one is outlined in green.</div></div>}
+        </Panel>
+        <Panel className="flex-1 min-h-0 flex flex-col" style={{ padding: 10 }}><Label>Live event stream</Label>
+          <div className="overflow-auto mt-1.5 flex-1">{evs.map(e => <div key={e.id} className="flex gap-2 items-start" style={{ padding: '3px 0' }}>
+            <span style={{ marginTop: 5, width: 6, height: 6, borderRadius: 6, flexShrink: 0, background: e.type.includes('fail') || e.type.includes('alert') ? C.red : e.actor.startsWith('creao') ? C.cyan : e.actor.startsWith('operator') ? C.amber : e.actor.startsWith('agent:') ? '#7aa2ff' : C.mint }} />
+            <div className="min-w-0"><div style={{ font: '500 11px ' + SANS, color: C.text }}>{e.type === 'state_transition' || e.type === 'wo_transition' ? (e.data.work_order ? e.data.work_order + ' ' : '') + e.data.from + ' → ' + e.data.to : e.type === 'agent_tool_call' ? 'CREAO · ' + e.data.tool : e.type.replace(/_/g, ' ')}</div>
+              <div className="truncate" style={{ font: '9.5px ' + MONO, color: C.dim }}>{ago(e.ts)} · {e.actor}{e.data.reason ? ' · ' + e.data.reason : ''}</div></div></div>)}</div>
+        </Panel>
+      </div>
+    </div>
   </div>;
 }
 
@@ -862,6 +1108,7 @@ function UserDiv() {
   const narrow = W < 1180;
   const toggleFs = async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else await rootRef.current.requestFullscreen(); } catch (e) { } };
   const [tab, setTab] = React.useState('control'); const [modal, setModal] = React.useState(null); const [toasts, setToasts] = React.useState([]); const [demoOpen, setDemoOpen] = React.useState(false);
+  g.setTab = setTab;
   const [rej, setRej] = React.useState(''); const [diffs, setDiffs] = React.useState({});
   const toast = React.useCallback((msg, kind) => { const id = Math.random(); setToasts(t => [...t, { id, msg, kind }]); setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4200); }, []);
   React.useEffect(() => { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap'; document.head.appendChild(l); return () => l.remove(); }, []);
@@ -882,7 +1129,7 @@ function UserDiv() {
       <div className="flex items-center gap-2"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke={C.cyan} strokeWidth="1.6" /><path d="M7 15l3-3 3 2 4-5" stroke={C.cyan} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /><circle cx="17" cy="9" r="1.6" fill={C.red} /></svg>
         <span style={{ font: '600 13px ' + SANS, letterSpacing: '.14em' }}>GRIDPILOT</span></div>
       <span className="gp-nw" style={{ font: '500 10.5px ' + MONO, color: C.mute, letterSpacing: '.12em' }}>{narrow ? '' : 'ATLAS COMPUTE · SFO-01 · '}<span style={{ color: g.conn === 'live' ? C.mint : C.amber }}>{g.conn === 'live' ? 'SIMULATION LIVE' : g.conn.toUpperCase()}</span></span>
-      <div className="flex gap-1 flex-wrap">{[['control', 'Control Room'], ['finops', narrow ? 'Finance' : 'Finance desk'], ['agents', narrow ? 'Agents' : 'Agent Operations'], ['settings', 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
+      <div className="flex gap-1 flex-wrap">{[['control', 'Control Room'], ['twin', narrow ? 'Twin' : 'Twin & reliability'], ['agents', narrow ? 'Agents' : 'Agent Operations'], ['finops', narrow ? 'Finance' : 'Finance desk'], ['settings', 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
       <div className="ml-auto flex items-center flex-wrap gap-x-4 gap-y-1 gp-hdr" style={{ font: '500 10.5px ' + MONO, color: C.mute }}>
         <span className="gp-nw">HEALTH <b style={{ color: health[1] }}>{health[0]}</b></span>
         <span className="gp-nw">INCIDENT <b style={{ color: inc && inc.state !== 'CLOSED' ? C.red : C.mint }}>{inc && inc.state !== 'CLOSED' ? inc.severity + ' ' + inc.id : 'NONE'}</b></span>
@@ -891,8 +1138,8 @@ function UserDiv() {
         {!narrow && <span className="gp-nw">MODE <b style={{ color: C.cyan }}>AUTONOMOUS · HUMAN-GATED</b></span>}
         {userId === ownerId ? <span className="gp-nw" title="Verified Mana identity used for console approvals">OP {userId.slice(0, 6)}</span> : <span title="Live view for visitors. Approvals, payments and settings belong to the operator." style={{ color: C.amber }}>VISITOR · LIVE VIEW</span>}
         <div className="relative"><Btn small onClick={() => setDemoOpen(!demoOpen)}>Demo ▾</Btn>
-          {demoOpen && <div className="absolute right-0 mt-2 z-50 flex flex-col py-1" style={{ width: 230, background: C.p2, border: '1px solid ' + C.line2, borderRadius: 10, boxShadow: '0 20px 50px rgba(0,0,0,.5)' }}>
-            {[['thermal', 'Start thermal incident (C02 degrades)'], ['arm_post_apply_failure', 'Arm post-apply failure (rollback demo)'], ['repair_c02', 'Repair C02'], ['repair_rack_faults', 'Repair rack fan faults'], ['reset', 'Reset demo']].map(([k, l]) => <button key={k} onClick={() => demo(k)} className="text-left px-3 py-2 hover:bg-white/5" style={{ font: '11.5px ' + SANS, color: k === 'reset' ? C.amber : C.text }}>{l}</button>)}
+          {demoOpen && <div className="absolute right-0 mt-2 z-50 flex flex-col py-1" style={{ width: 290, background: C.p2, border: '1px solid ' + C.line2, borderRadius: 10, boxShadow: '0 20px 50px rgba(0,0,0,.5)' }}>
+            {[['crah_bearing_wear', 'Predictive: C02 bearing starts wearing'], ['thermal', 'Start thermal incident (C02 degrades)'], ['security_anomaly', 'Security: after-hours access + firmware attempt'], ['arm_post_apply_failure', 'Arm post-apply failure (rollback demo)'], ['repair_c02', 'Repair C02'], ['repair_all', 'Repair all assets'], ['reset', 'Reset demo']].map(([k, l]) => <button key={k} onClick={() => demo(k)} className="text-left px-3 py-2 hover:bg-white/5" style={{ font: '11.5px ' + SANS, color: k === 'reset' ? C.amber : C.text }}>{l}</button>)}
             <div className="px-3 py-2 flex gap-1 items-center" style={{ borderTop: '1px solid ' + C.line }}><span style={{ font: '10px ' + MONO, color: C.dim }}>speed</span>{[1, 2, 4, 8].map(s => <button key={s} onClick={() => speed(s)} style={{ font: '10.5px ' + MONO, padding: '2px 7px', borderRadius: 5, color: st && st.speed === s ? '#04121a' : C.mute, background: st && st.speed === s ? C.cyan : 'transparent' }}>{s}×</button>)}</div>
             {st && st.fail_armed && <div className="px-3 pb-2" style={{ font: '10px ' + MONO, color: C.amber }}>failure armed for next apply</div>}
           </div>}</div>
@@ -907,6 +1154,7 @@ function UserDiv() {
     {tab === 'control' && <ControlRoom g={g} setModal={setModal} toast={toast} narrow={W < 900} />}
     {tab === 'finops' && <FinanceDesk g={g} toast={toast} narrow={W < 860} />}
     {tab === 'agents' && <AgentOps g={g} narrow={W < 980} />}
+    {tab === 'twin' && <TwinTab g={g} toast={toast} narrow={W < 980} />}
     {tab === 'settings' && <Settings g={g} toast={toast} />}
     <CallOverlay g={g} />
     {modal && modal.kind === 'diff' && <Modal wide title={'Configuration changes' + (plan ? ' · ' + plan.plan_id + ' v' + plan.version : '')} onClose={() => setModal(null)}>
