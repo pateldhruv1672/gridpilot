@@ -28,6 +28,16 @@ OPEN_FOR_PLANS = {"TRIAGING", "REPLAN", "AWAITING_APPROVAL", "DENIED", "ESCALATE
 CREAO_TASKS = {"diagnose_and_plan", "evaluate_alternative", "replan_after_failure", "execute_approved_plan", "post_incident_summary"}
 
 def now(): return time.time()
+
+def _summary_from_result(obj, raw):
+    """Fallback when no report was filed: turn the agent's final JSON into readable text instead of showing raw JSON."""
+    if not isinstance(obj, dict) or not obj: return raw or ""
+    order = ["diagnosis", "root_cause", "timeline", "actions", "mttr", "costs", "reconciliation", "reasoning_summary", "follow_up"]
+    lines = []
+    for k in order + [k for k in obj if k not in order]:
+        if k in ("incident_id", "task", "requested_action", "requires_approval", "plan_id", "plan_version") or k not in obj: continue
+        v = obj[k]; lines.append("%s: %s" % (k.replace("_", " ").capitalize(), v if isinstance(v, str) else json.dumps(v)))
+    return "\n".join(lines) or raw
 def jd(x): return json.dumps(x, default=lambda o: o.item() if hasattr(o, "item") else str(o))
 
 class DB:
@@ -280,9 +290,10 @@ class Engine:
             self.db.ex("update agent_runs set status=?, data=? where id=?", (st, jd(data), r["id"]))
             self.notify()
 
-    def parse_structured(self, text):
+    def parse_structured(self, text, task=None):
         req = ["incident_id", "diagnosis", "evidence", "candidate_actions", "expected_thermal_outcomes", "expected_sla_risks",
                "requested_action", "confidence", "reasoning_summary", "requires_approval"]
+        if task in ("post_incident_summary", "execute_approved_plan"): req = ["incident_id"]     # these file a report; the final JSON is a receipt
         if not text: return None, ["empty result"]
         s = text.find("{"); e = text.rfind("}")
         obj = None
@@ -300,7 +311,11 @@ class Engine:
         if st != "completed":
             self.event(inc["id"], "creao_run_unsuccessful", "backend", {"run_ref": r["id"], "status": st}); return
         if r["task"] == "post_incident_summary":
-            inc["summary"] = {"run_ref": r["id"], "text": data.get("result_text", "")[:6000]}; self.save_incident(inc)
+            # the summary itself is the report the agent filed with submit_report; the run's final JSON is only a receipt
+            rep = [x for x in inc.get("reports", []) if x.get("kind") == "post_incident_summary"]
+            text = rep[-1]["text"] if rep else _summary_from_result(data.get("structured") or {}, data.get("result_text", ""))
+            inc["summary"] = {"run_ref": r["id"], "text": text[:8000], "source": "submit_report" if rep else "final_answer", "by": rep[-1].get("by") if rep else None}
+            self.save_incident(inc); self.notify()
 
     # ------------------------------------------------------------------ dynamic CREAO agents (CREAO CLI, cr_sk_ key)
     async def ensure_agent(self, kind, name, text):
@@ -429,7 +444,7 @@ class Engine:
             if r["task"].startswith("specialist:"):
                 data["structured"], data["structured_errors"] = SP.parse_result(text)
             else:
-                data["structured"], data["structured_errors"] = self.parse_structured(text)
+                data["structured"], data["structured_errors"] = self.parse_structured(text, r["task"])
             self.db.ex("update agent_runs set status=?, completed=?, data=? where id=?", (st, now(), jd(data), r["id"]))
             self.event(r["incident_id"], "creao_run_" + st, "creao:" + r["provider_run_id"], {"run_ref": r["id"], "task": r["task"], "structured_valid": not data["structured_errors"]})
             if r["task"].startswith("specialist:"): await self.after_specialist(r, st, data)
