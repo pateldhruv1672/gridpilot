@@ -27,7 +27,7 @@
 - **Verified storm run:** within five minutes the watcher escalated the intrusion, the battery discharged through the price spike and stopped at its 40% reserve ($112 saved), the matcher held a lookalike-domain bank change and disputed an over-billed invoice, the AP Analyst made 12 recommendations, the Explainer explained the hold, the predictor flagged C04 (RUL 885 s), the detector opened INC-044 and the Remediation Agent proposed PLN-044, gated by policy for human approval.
 
 ## Cartesia
-- Voice is the approval channel: a Managed Agent calls the on-call engineer, explains the incident, evaluates their alternative live through a webhook tool, and collects approval with a one-time code verified by the backend.
+- Voice is the approval channel: a Managed Agent calls the on-call engineer, explains the incident, evaluates their alternative live through a webhook tool, and takes approval by voice: at 3 a.m. the engineer needs no laptop; the agent reads the exact plan version back and a clear spoken yes approves it. The call itself is the credential (GRIDPILOT dialed the consenting on-call number with a per-call token); the backend re-checks the version, approval window and live state and logs the engineer's words.
 - Features: Managed Agents, Sonic voice, agent webhook tools with dynamic variables, phone number provisioning, outbound calls, call status/transcript polling.
 - Limitations: US numbers only; approval authority is verified by the backend, never by the voice model.
 

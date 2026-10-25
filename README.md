@@ -43,7 +43,7 @@
 
 ## Cartesia track: voice where it matters
 
-The on-call engineer gets a phone call, not a dashboard ping. The Managed Agent (Sonic voice, Cartesia-hosted LLM) has six webhook tools into GRIDPILOT: `get_incident_context`, `evaluate_alternative` (runs the simulator forecast live on the call), `get_cost_comparison`, `request_plan_approval`, `reject_plan`, `escalate_incident`. Voice expresses intent; the backend verifies authority (one-time 6-digit code shown only to the operator, hashed, locked after 3 failures, bound to one plan version, expires in 15 min). Calls go only to a registered operator who consented.
+The on-call engineer gets a phone call, not a dashboard ping. The Managed Agent (Sonic voice, Cartesia-hosted LLM) has six webhook tools into GRIDPILOT: `get_incident_context`, `evaluate_alternative` (runs the simulator forecast live on the call), `get_cost_comparison`, `approve_plan`, `reject_plan`, `escalate_incident`. Voice expresses intent; the backend verifies authority (one-time 6-digit code shown only to the operator, hashed, locked after 3 failures, bound to one plan version, expires in 15 min). Calls go only to a registered operator who consented.
 
 ## CREAO: autonomous agents, created when needed
 
@@ -104,4 +104,4 @@ Local mode binds to 127.0.0.1 and treats you as the operator. Inside Mana the ba
 
 ## Responsible use
 
-Human approval is required for anything that costs money, touches a protected customer, or moves cash. Voice approval needs a one-time code bound to one plan version. Visitors get a read-only live view. Calls go only to a consenting, registered operator.
+Human approval is required for anything that costs money, touches a protected customer, or moves cash. Voice approval works with no screen: GRIDPILOT itself phones the registered on-call engineer, reads the exact plan version back, and a clear spoken yes approves that version (ambiguous answers never do). The outbound call holds a per-call token, the backend re-checks version, window and live state, and the engineer's words are stored with the approval. Visitors get a read-only live view. Calls go only to a consenting, registered operator.

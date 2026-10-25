@@ -396,10 +396,9 @@ function Metric({ label, value, unit, sub, tone }) {
 
 function IncidentPanel({ g, setModal, toast }) {
   const st = g.state; const inc = st && st.incident; const snap = g.snapRef.current;
-  const [alt, setAlt] = React.useState(''); const [busy, setBusy] = React.useState(null); const [code, setCode] = React.useState(null);
+  const [alt, setAlt] = React.useState(''); const [busy, setBusy] = React.useState(null);
   const run = async (key, fn) => { setBusy(key); try { const r = await fn(); if (r && r.message) toast(r.message, r.ok === false ? 'err' : 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(null); };
   const apr = inc && inc.approvals && inc.approvals.slice(-1)[0];
-  React.useEffect(() => { let t; const poll = async () => { if (inc && apr && apr.status === 'code_issued') { try { setCode(await g.api('/api/incidents/' + inc.id + '/approval-code')); } catch (e) { } } else setCode(null); }; poll(); t = setInterval(poll, 3000); return () => clearInterval(t); }, [inc && inc.id, apr && apr.status]);
   if (!inc) return <div className="p-5 flex flex-col gap-3">
     <Label color={C.mint}>All systems nominal</Label>
     <div style={{ font: '500 15px ' + SANS, color: C.text }}>No active incident</div>
@@ -462,7 +461,7 @@ function IncidentPanel({ g, setModal, toast }) {
       </div>
       <div className="mt-2" style={{ font: '10.5px/1.5 ' + SANS, color: C.mute }}>{plan.policy.plan_rules.concat(plan.policy.actions).filter(r => r.decision !== 'AUTO_ALLOWED').map(r => r.rule).join(' · ')}</div>
       {plan.meta && plan.meta.reasoning_summary && <div className="mt-2 p-2.5 rounded" style={{ background: 'rgba(67,217,245,.05)', border: '1px solid rgba(67,217,245,.18)', font: '11.5px/1.5 ' + SANS, color: '#c7d6e6' }}><Label color={C.cyan}>CREAO reasoning</Label><div className="mt-1">{plan.meta.reasoning_summary}</div>{plan.meta.confidence != null && <div style={{ font: '10px ' + MONO, color: C.mute, marginTop: 4 }}>confidence {plan.meta.confidence}</div>}</div>}
-      {code && code.code && <div className="mt-3 p-3 rounded text-center" style={{ background: 'rgba(79,224,165,.07)', border: '1px solid rgba(79,224,165,.4)' }}><Label color={C.mint}>Voice approval code · {code.plan_id} v{code.plan_version}</Label><div style={{ font: '600 28px ' + MONO, letterSpacing: '0.3em', color: C.mint, marginTop: 4 }}>{code.code}</div><div style={{ font: '10.5px ' + SANS, color: C.mute }}>Read this to the GRIDPILOT voice agent to authorize this exact plan version.</div></div>}
+      {apr && apr.status === 'approved' && apr.data && apr.data.operator_said && <div className="mt-3 p-3 rounded" style={{ background: 'rgba(79,224,165,.07)', border: '1px solid rgba(79,224,165,.4)' }}><Label color={C.mint}>Approved by phone · on-call {String(apr.data.actor || '').replace('on-call:', '')} · {apr.data.phone}</Label><div style={{ font: 'italic 14px/1.45 ' + SANS, color: C.text, marginTop: 4 }}>“{apr.data.operator_said}”</div><div style={{ font: '10px ' + MONO, color: C.mute, marginTop: 3 }}>{apr.data.call_id} · plan v{apr.data.plan_version} read back by the voice agent before the yes · {apr.data.renewed_window ? 'window re-checked on live telemetry first · ' : ''}logged in the audit trail</div></div>}
       {inc.state === 'AWAITING_APPROVAL' && apr && <div className="mt-3 flex items-center gap-2 flex-wrap px-2.5 py-2 rounded" style={{ background: 'rgba(255,187,85,.06)', border: '1px solid rgba(255,187,85,.3)', font: '10.5px ' + MONO, color: C.mute }}>
         <span style={{ color: C.amber, fontWeight: 600 }}>Needs your approval</span><span>· {plan.policy.plan_rules.concat(plan.policy.actions).filter(r => r.decision !== 'AUTO_ALLOWED').map(r => r.rule).filter((x, i, a) => a.indexOf(x) === i).join(' · ') || 'policy'}</span>
         <span className="ml-auto">window <Countdown until={apr.expires} /></span><button onClick={() => setModal({ kind: 'approvals' })} style={{ color: C.cyan, fontWeight: 600 }}>How approval works →</button></div>}
@@ -498,7 +497,8 @@ function CallOverlay({ g }) {
   if (!call || hidden || (Date.now() / 1000 - call.created > 1800)) return null;
   const pc = call.data.provider_call || {};
   const tr = pc.transcript || pc.messages || pc.turns || [];
-  const evs = (g.state.events || []).filter(e => e.incident_id === inc.id && ['operator_suggestion', 'creao_run_started', 'creao_run_completed', 'state_transition', 'voice_tool_call'].includes(e.type) && e.ts >= call.created).reverse();
+  const evs = (g.state.events || []).filter(e => e.incident_id === inc.id && ['operator_suggestion', 'creao_run_started', 'creao_run_completed', 'state_transition', 'voice_tool_call', 'voice_approval', 'voice_approval_refused'].includes(e.type) && e.ts >= call.created).reverse();
+  const said = evs.filter(e => e.type === 'voice_approval' || e.type === 'voice_approval_refused').slice(-1)[0];
   const sug = evs.find(e => e.type === 'operator_suggestion');
   const chain = sug ? [['Human suggestion', true], ['CREAO re-analysis', evs.some(e => e.type === 'creao_run_started' && e.ts >= sug.ts)], ['Finance evaluation', evs.some(e => e.type === 'voice_tool_call' && e.ts >= sug.ts)], ['Revised plan', evs.some(e => e.type === 'state_transition' && e.data.to === 'PLAN_PROPOSED' && e.ts >= sug.ts)]] : null;
   const apr = (inc.approvals || []).slice(-1)[0]; const plan = (inc.plans || []).slice(-1)[0];
@@ -513,6 +513,9 @@ function CallOverlay({ g }) {
       <div className="px-3.5 py-2.5 flex flex-col gap-2">
         <div style={{ font: '10.5px ' + MONO, color: C.mute }}>{inc.id} · plan {plan ? plan.plan_id + ' v' + plan.version : '—'} · approval {apr ? apr.status : 'none'}</div>
         {call.status === 'failed' && <div style={{ font: '11px/1.45 ' + SANS, color: C.amber }}>{call.data.error || 'Call not placed'}. No call was made.</div>}
+        {said && <div className="p-2 rounded" style={{ background: said.type === 'voice_approval' && said.data.ok ? 'rgba(79,224,165,.08)' : 'rgba(255,187,85,.07)', border: '1px solid ' + (said.type === 'voice_approval' && said.data.ok ? 'rgba(79,224,165,.4)' : 'rgba(255,187,85,.35)') }}>
+          <div style={{ font: '600 9px ' + MONO, letterSpacing: '.12em', color: said.type === 'voice_approval' && said.data.ok ? C.mint : C.amber }}>{said.type === 'voice_approval' && said.data.ok ? 'APPROVED BY VOICE · ' + said.data.plan_id + ' v' + said.data.plan_version : 'NOT TREATED AS APPROVAL'}</div>
+          <div style={{ font: 'italic 12px/1.4 ' + SANS, color: C.text, marginTop: 2 }}>“{said.data.operator_said}”</div></div>}
         {chain && <div className="flex items-center gap-1 flex-wrap">{chain.map(([l, ok], i) => <React.Fragment key={l}><span style={{ font: '9.5px ' + MONO, padding: '2px 6px', borderRadius: 4, color: ok ? C.cyan : C.dim, border: '1px solid ' + (ok ? 'rgba(67,217,245,.45)' : C.line) }}>{l}</span>{i < 3 && <span style={{ color: C.dim }}>→</span>}</React.Fragment>)}</div>}
         <div className="overflow-auto flex flex-col gap-1" style={{ maxHeight: 150 }}>
           {Array.isArray(tr) && tr.length ? tr.slice(-12).map((t, i) => <div key={i} style={{ font: '11px/1.4 ' + SANS, color: (t.role || t.speaker) === 'user' ? C.text : '#9fd8ec' }}><b style={{ font: '600 9.5px ' + MONO, color: C.dim }}>{(t.role || t.speaker || '').toUpperCase()} </b>{t.text || t.content || t.message}</div>)
@@ -1007,6 +1010,7 @@ function ApprovalCenter({ g, toast, data, setTab, onClose }) {
   return <div className="flex flex-col gap-4">
     <div><Label color={C.cyan}>How approval works</Label>
       <div className="flex flex-wrap items-center gap-1.5 mt-2">{((data && data.flow) || []).map((f, i, a) => <React.Fragment key={i}><span style={{ font: '11px/1.35 ' + SANS, padding: '5px 9px', borderRadius: 8, background: i === 2 ? 'rgba(255,187,85,.1)' : C.p1, border: '1px solid ' + (i === 2 ? 'rgba(255,187,85,.45)' : C.line), color: i === 2 ? '#ffd9a0' : C.text, maxWidth: 230 }}><b style={{ font: '600 9px ' + MONO, color: C.dim, marginRight: 5 }}>{i + 1}</b>{f}</span>{i < a.length - 1 && <span style={{ color: C.dim }}>→</span>}</React.Fragment>)}</div>
+      <div className="mt-2 p-2.5 rounded" style={{ background: 'rgba(180,156,255,.06)', border: '1px solid rgba(180,156,255,.25)', font: '11.5px/1.55 ' + SANS, color: '#ddd5fa' }}><b>3 a.m., engineer asleep, no laptop:</b> when a plan needs a human, GRIDPILOT phones the registered on-call engineer itself (Cartesia). The voice agent explains the incident, reads the exact plan back and asks "Do you approve plan X version N?". A clear spoken yes approves that version; "maybe", "hold on" or silence never does. The call is the credential: only GRIDPILOT's outbound call to the consenting on-call number holds the per-call token, and the engineer's words are stored with the approval.</div>
       <div style={{ font: '11px/1.55 ' + SANS, color: C.mute, marginTop: 6 }}>Agents can only propose. The policy engine decides what may run alone (for example a fan change) and what needs you (moving customer workloads, spending more than $100, taking cooling out of service). An approval is tied to one exact plan version and expires after 15 minutes; if the agent replans, you approve the new version. If a window lapses, Approve re-checks the same plan on live telemetry first and only then records your decision.</div></div>
     <div><div className="flex items-baseline gap-2"><Label color={C.amber}>Waiting for you</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>{items.length} decision{items.length === 1 ? '' : 's'}</span></div>
       {items.length === 0 && <div style={{ font: '11.5px ' + SANS, color: C.mute, marginTop: 6 }}>Nothing pending. Run a scenario to create decisions.</div>}

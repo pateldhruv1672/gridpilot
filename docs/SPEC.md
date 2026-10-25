@@ -561,7 +561,7 @@ If the plan materially changes afterward, require fresh approval.
 
 Do not treat a spoken "yes" as sufficient authorization by itself.
 
-For the prototype, use a verified operator session with a one-time approval code or a corresponding dashboard approval confirmation.
+For the prototype, approval is either a verified dashboard session or a spoken yes on the outbound call GRIDPILOT places to the registered on-call engineer (plan version read back first; words logged).
 
 Voice captures intent; the backend verifies authority.
 

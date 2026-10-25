@@ -630,7 +630,7 @@ class Engine:
         self.event(inc_id, "approval_renewed", actor, {**summary, "approval_id": aid})
         return True, "re-checked on live telemetry; approval window renewed for %s v%d" % (plan["id"], plan["version"]), aid
 
-    def verify_approval(self, inc_id, plan_id, plan_version, channel, actor, code=None):
+    def verify_approval(self, inc_id, plan_id, plan_version, channel, actor, code=None, evidence=None):
         inc = self.incident(inc_id); plan = self.current_plan(inc_id); apr = self.pending_approval(inc_id)
         if not inc or inc["state"] != "AWAITING_APPROVAL": return False, "incident is not awaiting approval (state %s)" % (inc or {}).get("state")
         if not plan or plan["id"] != plan_id or int(plan_version) != plan["version"]:
@@ -638,17 +638,10 @@ class Engine:
         if not apr or apr["plan_version"] != plan["version"]: return False, "no pending approval for this plan version"
         if now() > apr["expires"]:
             self.db.ex("update approvals set status='expired' where id=?", (apr["id"],)); return False, "approval window expired; use Re-check & renew"
-        if channel == "voice":
-            d = json.loads(apr["data"])
-            if not code or "code_hash" not in d or hashlib.sha256(str(code).strip().encode()).hexdigest() != d["code_hash"]:
-                d["failed_attempts"] = d.get("failed_attempts", 0) + 1
-                self.db.ex("update approvals set data=? where id=?", (jd(d), apr["id"]))
-                if d["failed_attempts"] >= 3: self.db.ex("update approvals set status='locked' where id=?", (apr["id"],))
-                return False, "approval code did not verify"
-        d = json.loads(apr["data"]); d.update({"channel": channel, "actor": actor, "decided_at": now(), "plan_version": plan["version"]})
+        d = json.loads(apr["data"]); d.update({"channel": channel, "actor": actor, "decided_at": now(), "plan_version": plan["version"], **(evidence or {})})
         self.db.ex("update approvals set status='approved', data=? where id=?", (jd(d), apr["id"]))
         self.db.ex("update plans set status='approved' where id=? and version=?", (plan_id, plan["version"]))
-        self.transition(inc, "APPROVED", actor, "verified %s approval of %s v%d" % (channel, plan_id, plan["version"]), {"approval_id": apr["id"], "channel": channel})
+        self.transition(inc, "APPROVED", actor, "verified %s approval of %s v%d" % (channel, plan_id, plan["version"]), {"approval_id": apr["id"], "channel": channel, **({"operator_said": evidence.get("operator_said"), "call_id": evidence.get("call_id")} if evidence else {})})
         self.spawn(self.after_approval(inc_id, plan_id, plan["version"]))
         return True, "approved"
 

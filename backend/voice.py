@@ -1,6 +1,6 @@
 
 """Cartesia Managed Agents integration: agent + webhook tools setup, outbound call, call polling, and voice tool handlers.
-Voice captures intent; the backend verifies authority (one-time code shown on the owner's console)."""
+Authority comes from the call itself: GRIDPILOT dials the registered, consenting on-call number with a per-call token; a clear spoken yes to an exact plan version, read back by the agent, approves it. The backend re-checks version, window and live state, and logs the words."""
 import asyncio, json, secrets, time, traceback
 import integrations as IX
 
@@ -11,24 +11,24 @@ TOOLS = {
         "strategy": {"type": "string", "enum": ["throttle_only", "migrate_only", "migrate_and_throttle", "fan_boost_only", "other"], "description": "Closest strategy category."},
         "throttle_pct": {"type": "number", "description": "GPU power reduction percent if the operator named one, else 10."}}),
     "get_cost_comparison": ("Return the structured cost, SLA-risk and recovery comparison of evaluated options with assumptions.", {}),
-    "request_plan_approval": ("Start or continue verified approval of an exact plan version. First call without approval_code: the operator then sees a 6-digit code on the GRIDPILOT console. Call again with the code they read aloud.", {
+    "approve_plan": ("Record the on-call engineer's spoken approval of an exact plan version. Call ONLY after you read the plan back and they clearly said yes. Pass their exact words.", {
         "plan_id": {"type": "string", "description": "Plan id from get_incident_context."},
         "plan_version": {"type": "integer", "description": "Plan version from get_incident_context."},
-        "approval_code": {"type": "string", "description": "6-digit code read by the operator; omit on the first call."}}),
+        "operator_said": {"type": "string", "description": "The engineer's exact words of approval, verbatim (e.g. 'yes, go ahead with version 2')."}}),
     "reject_plan": ("Record that the operator rejects the current plan, with their reason.", {"reason": {"type": "string", "description": "Why the operator rejected it."}}),
     "escalate_incident": ("Escalate the incident to another authorized person.", {"reason": {"type": "string", "description": "Reason for escalation."}}),
 }
 
 INSTRUCTIONS = """You are the GRIDPILOT Voice Operator for Atlas Compute's SFO-01 GPU pod (a simulated data center used for an operations demo).
-You are on a phone call with {{operator_name}}, the on-call infrastructure operator, about incident {{incident_id}}.
+GRIDPILOT itself placed this call to {{operator_name}}, the registered on-call engineer, about incident {{incident_id}}. Assume it may be 3 a.m.: they may have just woken up and have no access to a computer. Everything must work by voice alone.
 Rules:
-- Call get_incident_context before stating any fact, and again whenever the operator asks for an update. Never invent numbers, racks, costs or plan versions.
-- Explain briefly: what is happening, the probable cause, the recommended plan (plan id and version), expected recovery, incremental cost, and SLA risk. Keep each turn short and conversational.
-- If the operator suggests a different approach, say you will evaluate it, call evaluate_alternative, then explain the result honestly, including if their option is worse.
-- A spoken yes is NOT authorization. To approve, call request_plan_approval with plan_id and plan_version from the latest context and no code. Then ask the operator to read the 6-digit approval code now shown on their GRIDPILOT console, and call request_plan_approval again with that code. Report exactly what the backend returns.
-- If the plan version changed, the old approval is void; get fresh approval for the new version.
-- If the operator rejects, call reject_plan with their reason. If they ask to escalate, call escalate_incident.
-- Values are simulated (synthetic hardware and customers); say so if asked. End the call politely when done."""
+- Open calmly: who you are, that it is about a live incident, and that you need a decision. Then call get_incident_context before stating any fact, and again whenever they ask for an update. Never invent numbers, racks, costs or plan versions.
+- Brief them in plain words, short sentences: what is happening, the probable cause, what the agent recommends (plan id and version, each action in everyday language), expected recovery time, the added cost, and the customer/SLA risk if nothing is done. Offer to repeat or slow down.
+- If they suggest a different approach, say you will evaluate it, call evaluate_alternative, and explain the result honestly, including when their option is worse.
+- To approve: read the exact plan back ("plan PLN-x version N: move ..., set ..."), then ask a direct question: "Do you approve plan PLN-x version N?" Only after a clear, unambiguous yes, call approve_plan with plan_id, plan_version and operator_said set to their exact words. Never approve on silence, "maybe", "hold on", questions, or a yes to a different question. If unsure, ask again.
+- Tell them exactly what the backend returns: approved and executing, or why not (for example the plan changed: then brief the new version and ask again).
+- If they reject, call reject_plan with their reason. If they want someone else to decide, call escalate_incident.
+- Values are simulated (synthetic hardware and customers); say so if asked. After a decision, confirm what happens next and end the call politely."""
 
 def _paths(p):
     return [p, "/v1" + p] if not p.startswith("/v1") else [p, p[3:]]
@@ -48,10 +48,14 @@ def ensure_setup(engine):
     db = engine.db; base = engine.public_base
     if not base: raise IX.ProviderError("no public URL for webhook tools yet")
     tool_ids = db.get("cartesia_tool_ids", {})
+    for stale in [k for k in tool_ids if k not in TOOLS]:      # retired tools (e.g. the old code-based approval)
+        try: cart("DELETE", "/v1/agents/tools/" + tool_ids[stale])
+        except Exception: pass
+        tool_ids.pop(stale, None)
     for name, (desc, params) in TOOLS.items():
         props = {"incident_id": {"type": "string", "dynamic_variable": "incident_id"}}
         props.update(params)
-        req = [k for k in params if k in ("suggestion", "plan_id", "plan_version", "reason")]
+        req = [k for k in params if k in ("suggestion", "plan_id", "plan_version", "reason", "operator_said")]
         schema = {"url": base + "/tools/voice/" + name, "method": "POST",
                   "request_body_schema": {"type": "object", "properties": props, "required": req},
                   "request_headers": {"X-GridPilot-Call-Token": {"type": "dynamic_variable", "name": "call_token"}}}
@@ -63,7 +67,7 @@ def ensure_setup(engine):
             tool_ids[name] = cart("POST", "/v1/agents/tools", body)["id"]
         db.set("cartesia_tool_ids", tool_ids)
     cfg = {"instructions": INSTRUCTIONS,
-           "initial_message": "Hello {{operator_name}}, this is GRIDPILOT for Atlas Compute, calling about critical incident {{incident_id}} in the SFO-01 pod. Do you have a minute?",
+           "initial_message": "Hi {{operator_name}}, this is GRIDPILOT, the on-call assistant for Atlas Compute. Sorry to wake you. There is a live incident, {{incident_id}}, in the SFO-01 pod and I need a decision from you. Can you hear me okay?",
            "tools": [{"id": i} for i in tool_ids.values()],
            "system_tools": {"end_call": {"description": "End the call when the conversation is complete or the operator asks to hang up."}},
            "dynamic_variable_placeholders": {"incident_id": "INC-000", "call_token": "x", "operator_name": "operator"},

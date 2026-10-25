@@ -315,7 +315,7 @@ async def api_approvals(req):
         out.append({"kind": "incident", "id": inc["id"], "loop": "Remediation", "title": "%s v%d · %s" % (plan["plan_id"], plan["version"], inc["rack"]), "what": [STY.act_txt(a) for a in plan["actions"]],
                     "why_human": list(dict.fromkeys(rules)) or ["policy requires human approval"], "proposed_by": plan.get("author"), "evidence": {"forecast recovery": ("%ss" % plan["forecast"]["recover_s"]) if plan["forecast"].get("recover_s") is not None else "none in 10 min", "cost": plan["finance"].get("incremental_cost_usd"), "SLA exposure avoided": (plan["baseline"].get("sla_exposure_usd") or 0) - (plan["finance"].get("sla_exposure_usd") or 0)},
                     "reasoning": (plan.get("meta") or {}).get("reasoning_summary"), "approval": apr and {"id": apr["id"], "status": apr["status"], "expires": apr["expires"], "expired": now_ > apr["expires"] or apr["status"] == "expired"},
-                    "plan_id": plan["plan_id"], "plan_version": plan["version"], "channels": ["console", "voice code (Cartesia call)"],
+                    "plan_id": plan["plan_id"], "plan_version": plan["version"], "channels": ["console", "phone call to on-call (spoken yes)"],
                     "after": "backend re-checks plan version and live telemetry, commits the change to git, validates, monitors recovery, rolls back on failure"})
     for w in REL.list(10):
         if w["state"] != "AWAITING_APPROVAL" or not w.get("plans"): continue
@@ -333,7 +333,7 @@ async def api_approvals(req):
         if inv["status"] == "awaiting_controller":
             out.append({"kind": "invoice", "id": inv["id"], "loop": "Finance", "title": "%s · %s %s" % (inv["id"], inv.get("vendor_name") or inv.get("vendor"), fmt_money(inv.get("amount") or inv.get("total") or 0)), "what": ["controller sign-off before payment"],
                         "why_human": ["payments above the auto-approve limit need a controller (segregation of duties)"], "proposed_by": "AP matcher + CREAO AP Analyst", "reasoning": inv.get("reason") or inv.get("decision_reason"), "evidence": {}, "channels": ["Finance desk"], "approval": {"status": "pending"}})
-    return jresp({"items": out, "auto_call": ENG.db.get("auto_call", True), "flow": ["agent proposes (never approves)", "policy engine: auto-allowed / approval required / forbidden", "human approves the exact plan version (console click or spoken one-time code on a Cartesia call)", "backend re-verifies version, window and live state", "git commit + apply", "validate and monitor, roll back on failure", "audit log"]})
+    return jresp({"items": out, "auto_call": ENG.db.get("auto_call", True), "flow": ["agent proposes (never approves)", "policy engine: auto-allowed / approval required / forbidden", "human approves the exact plan version: console click, or a clear spoken yes when GRIDPILOT phones the on-call engineer", "backend re-verifies version, window and live state", "git commit + apply", "validate and monitor, roll back on failure", "audit log"]})
 
 def fmt_money(v):
     try: return "$%s" % format(float(v), ",.2f")
@@ -378,7 +378,7 @@ async def api_voice_check(req):
                       "duration_s": pc.get("duration_seconds") or pc.get("duration"), "turns": len(tr) if isinstance(tr, list) else 0, "agent_call_id": d.get("agent_call_id")})
     tools_used = ENG.db.all("select ts, substr(data,1,160) d from events where type='voice_tool_call' order by id desc limit 5")
     return jresp({"checks": checks, "ready": all(c["ok"] for c in checks[:5]), "calls": calls, "voice_tool_calls": tools_used,
-                  "how_to_test": "Open an incident (Scenarios → Cooling failure), wait for the plan to reach Awaiting approval, then press Call me about this. Your phone rings from the outbound number; the agent reads the plan and asks for the 6-digit code shown on screen. Saying the code approves exactly that plan version."})
+                  "how_to_test": "Run Scenarios → Cooling failure (or wait for any plan to reach Awaiting approval). With auto-call on, GRIDPILOT phones the on-call number by itself; otherwise press Call me about this. Your phone rings from the outbound number, the agent explains the incident, reads the plan back and asks 'Do you approve plan X version N?'. Say yes: that approves exactly that version, no screen needed. Your words are stored in the audit log."})
 
 @routes.get("/api/ghost/digest")
 async def api_ghost_digest(req): owner_only(req); return jresp(GHOST.digest())
@@ -1235,6 +1235,35 @@ def strategy_actions(iid, strategy, pct):
     if strategy == "fan_boost_only": return [{"type": "set_cooling_fan", "unit": u, "fan_pct": 125} for u in ("C01", "C03")]
     return []
 
+import re
+YES_RE = re.compile(r"\b(yes|yeah|yep|approve|approved|go ahead|do it|confirm|confirmed|proceed|authori[sz]e|sounds good|ok|okay|sure)\b", re.I)
+NO_RE = re.compile(r"\b(no|nope|don'?t|do not|reject|wait|hold on|hold off|stop|cancel|not yet|later|not sure|maybe)\b", re.I)
+
+async def phone_approval(iid, tok, args):
+    """On-call approval by voice. Authority = this exact call: GRIDPILOT dialed the registered, consenting on-call number for this
+    incident and minted a token only that call holds. The engineer's clear spoken yes to a read-back plan version approves it."""
+    said = str(args.get("operator_said") or "").strip()[:500]
+    call = ENG.db.one("select * from calls where id=? and incident_id=?", (tok["call_id"], iid))
+    if not call: return {"ok": False, "message": "this call is not registered for the incident; cannot approve"}
+    if call["status"] in ("failed", "completed", "ended", "canceled", "cancelled", "no_answer", "busy"): return {"ok": False, "message": "the call is no longer active"}
+    if not said or not YES_RE.search(said) or NO_RE.search(said):
+        ENG.event(iid, "voice_approval_refused", "cartesia:%s" % tok["call_id"], {"operator_said": said, "reason": "not a clear yes"})
+        return {"ok": False, "message": "That was not a clear yes. Read the plan back and ask again: 'Do you approve plan %s version %s?'" % (args.get("plan_id"), args.get("plan_version"))}
+    plan = ENG.current_plan(iid)
+    if not plan or plan["id"] != args.get("plan_id") or int(args.get("plan_version") or -1) != plan["version"]:
+        return {"ok": False, "message": "The plan changed. The current plan is %s version %s: %s. Brief it and ask again." % (plan and plan["id"], plan and plan["version"], plan and "; ".join(STY.act_txt(a) for a in plan["actions"]))}
+    apr = ENG.pending_approval(iid)
+    renewed = False
+    if not apr or time.time() > apr["expires"]:
+        okr, msgr, _ = await ENG.renew_approval(iid, "on-call:%s" % tok["operator"])
+        if not okr: return {"ok": False, "message": "I re-checked the plan on live telemetry and it no longer holds: %s. The agent is replanning; I'll brief you on the new version." % msgr}
+        renewed = True
+    d = json.loads(call["data"] or "{}"); op = ENG.db.get("operator") or {}
+    evidence = {"operator_said": said, "call_id": tok["call_id"], "agent_call_id": d.get("agent_call_id"), "phone": "•••" + str(op.get("phone", ""))[-4:], "renewed_window": renewed}
+    okv, msg = ENG.verify_approval(iid, plan["id"], plan["version"], "phone (on-call)", "on-call:%s" % tok["operator"], evidence=evidence)
+    ENG.event(iid, "voice_approval", "on-call:%s" % tok["operator"], {**evidence, "plan_id": plan["id"], "plan_version": plan["version"], "ok": okv, "result": msg})
+    return {"ok": okv, "message": ("Approved %s version %d. GRIDPILOT is applying it now through git and will verify recovery." % (plan["id"], plan["version"])) if okv else msg}
+
 @routes.post("/tools/voice/{tool}")
 async def voice_tool(req):
     tok = voice_auth(req); tool = req.match_info["tool"]; iid = tok["incident_id"]
@@ -1245,7 +1274,9 @@ async def voice_tool(req):
         if tool == "get_incident_context":
             res = await tool_dispatch("get_incident_context", {}, iid, actor, "voice")
             res.pop("neighbors", None); res.pop("cooling_units", None)
-            if res.get("approval") and res["approval"]["status"] == "code_issued": res["approval"]["note"] = "a 6-digit code is displayed on the operator's GRIDPILOT console"
+            pl = ENG.current_plan(iid)
+            if pl: res["plan_in_plain_words"] = "%s version %d: %s" % (pl["id"], pl["version"], "; ".join(STY.act_txt(a) for a in pl["actions"]))
+            res["how_to_approve"] = "read the plan back, ask 'Do you approve plan %s version %s?', and on a clear yes call approve_plan with their exact words" % ((pl or {}).get("id"), (pl or {}).get("version"))
         elif tool == "evaluate_alternative":
             sug = str(args.get("suggestion", ""))[:500]; strat = args.get("strategy") or "other"
             ENG.event(iid, "operator_suggestion", actor, {"suggestion": sug, "strategy": strat, "channel": "voice"})
@@ -1269,14 +1300,8 @@ async def voice_tool(req):
                    "creao_status": "revised plan ready" if revised else ("CREAO re-analysis still running; call get_incident_context shortly" if run else "CREAO unavailable")}
         elif tool == "get_cost_comparison":
             res = await tool_dispatch("get_cost_comparison", {}, iid, actor, "voice")
-        elif tool == "request_plan_approval":
-            code = args.get("approval_code")
-            if not code:
-                c, msg = ENG.issue_voice_code(iid, args.get("plan_id"), args.get("plan_version"))
-                res = {"ok": bool(c), "message": "A 6-digit approval code is now shown on the operator's GRIDPILOT console. Ask them to read it." if c else msg}
-            else:
-                okv, msg = ENG.verify_approval(iid, args.get("plan_id"), args.get("plan_version"), "voice", "operator(voice):%s" % tok["operator"], code=code)
-                res = {"ok": okv, "message": msg}
+        elif tool == "approve_plan":
+            res = await phone_approval(iid, tok, args)
         elif tool == "reject_plan":
             ENG.reject(iid, "operator(voice):%s" % tok["operator"], args.get("reason") or "rejected on call"); res = {"ok": True}
         elif tool == "escalate_incident":
