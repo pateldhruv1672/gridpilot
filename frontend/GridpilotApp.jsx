@@ -491,7 +491,7 @@ function sample(F, x, z) {
 }
 function statusColor(s) { return s === 'critical' ? C.red : s === 'elevated' ? C.amber : C.mint; }
 
-function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd }) {
+function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd, impactRef }) {
   const wrap = React.useRef(null), labelsRef = React.useRef(null);
   const optsRef = React.useRef(opts); optsRef.current = opts;
   const selRef = React.useRef(selected); selRef.current = selected;
@@ -547,6 +547,9 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd })
     const blades = new THREE.InstancedMesh(new THREE.BoxGeometry(0.46, 0.115, 0.025), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95 }), 512);
     for (let g = 0; g < 512; g++) { const i = g >> 3, k = g & 7, r = Math.floor(i / 8); const [x, z] = rackPos(i); const face = r % 2 === 0 ? z + 0.565 : z - 0.565; m4.makeTranslation(x, 0.3 + k * 0.17, face); blades.setMatrixAt(g, m4); blades.setColorAt(g, col.set(0x1a2433)); }
     scene.add(blades);
+    // strategy-impact halos (floor rings around racks a plan changed)
+    const halos = [];
+    for (let k = 0; k < 8; k++) { const m = new THREE.Mesh(new THREE.RingGeometry(0.62, 0.74, 40), new THREE.MeshBasicMaterial({ color: 0x4fe0a5, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending })); m.rotation.x = -Math.PI / 2; m.visible = false; scene.add(m); halos.push(m); }
     // selection box
     const selBox = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(0.76, 2.16, 1.26)), new THREE.LineBasicMaterial({ color: 0x43d9f5, transparent: true, opacity: 1 }));
     selBox.visible = false; scene.add(selBox);
@@ -671,10 +674,11 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd })
           const sc = new THREE.Color(statusColor(rk.status));
           const pulse = rk.status === 'critical' && !reduced ? 0.55 + 0.45 * Math.sin(clock * 6) : 1;
           let ec = base ? new THREE.Color(base[0], base[1], base[2]) : (rk.status === 'normal' ? new THREE.Color(C.cyan).multiplyScalar(0.55) : sc);
-          if (mode === 'thermal' || mode === 'combined') { const t = ramp((rk.gpu_temp_c - 55) / 40); ec = rk.status === 'normal' ? new THREE.Color(t[0], t[1], t[2]).multiplyScalar(0.6) : sc; }
+          let heatBody = null;
+          if (mode === 'thermal' || mode === 'combined') { const t = ramp((rk.gpu_temp_c - 52) / 40); ec = new THREE.Color(t[0], t[1], t[2]).multiplyScalar(rk.status === 'normal' ? 0.7 : 1.0); heatBody = new THREE.Color(t[0] * 0.3, t[1] * 0.3, t[2] * 0.3); }
           ec.multiplyScalar(pulse);
           for (let v = 0; v < per; v++) { const q = (i * per + v) * 3; edgeCol[q] = ec.r; edgeCol[q + 1] = ec.g; edgeCol[q + 2] = ec.b; }
-          racks.setColorAt(i, col.set(base ? new THREE.Color(base[0] * 0.35, base[1] * 0.35, base[2] * 0.35) : new THREE.Color(rk.status === 'critical' ? 0x3a1b22 : rk.status === 'elevated' ? 0x2e2618 : 0x1a2433)));
+          racks.setColorAt(i, col.set(base ? new THREE.Color(base[0] * 0.35, base[1] * 0.35, base[2] * 0.35) : heatBody ? heatBody : new THREE.Color(rk.status === 'critical' ? 0x3a1b22 : rk.status === 'elevated' ? 0x2e2618 : 0x1a2433)));
           leds.setColorAt(i, col.set(sc).multiplyScalar(pulse));
         }
         edgeGeo.attributes.color.needsUpdate = true; racks.instanceColor.needsUpdate = true; leds.instanceColor.needsUpdate = true;
@@ -682,6 +686,8 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd })
         if (gp) { for (let g = 0; g < 512; g++) { let c3; if (mode === 'power') c3 = ramp((gp.power[g] - 60) / 420); else if (mode === 'workload') c3 = gp.owner[g] ? ramp(gp.util[g] * 0.9) : [0.12, 0.16, 0.22]; else c3 = ramp((gp.temp[g] - 55) / 40);
           const th = gp.throttle[g] && !reduced ? 0.6 + 0.4 * Math.sin(clock * 7 + g) : 1; const dim = gp.owner[g] ? 1 : 0.35; blades.setColorAt(g, col.setRGB(c3[0] * th * dim, c3[1] * th * dim, c3[2] * th * dim)); }
           blades.instanceColor.needsUpdate = true; }
+        const imp = impactRef && impactRef.current;
+        halos.forEach((h, k) => { const r = imp && imp.racks[k]; if (!r) { h.visible = false; return; } const [x, z] = rackPos(r.idx); h.position.set(x, 0.02, z); h.visible = true; h.material.color.set(impactColor(r.d)); const s = reduced ? 1 : 1 + 0.12 * Math.sin(clock * 2.2 + k); h.scale.set(s, s, s); h.material.opacity = (r.d <= -1 || r.d >= 1 ? 0.75 : 0.35) * (reduced ? 1 : 0.7 + 0.3 * Math.sin(clock * 2.2 + k)); });
         if (sel != null) { const [x, z] = rackPos(sel); selBox.position.set(x, 1.0, z); selBox.visible = true; selBox.material.opacity = 0.6 + 0.4 * Math.sin(clock * 3); } else selBox.visible = false;
         snap.cooling.forEach((u, k) => { const bad = 1 - u.effectiveness; crah[k].g.material.emissive.set(bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan); crah[k].g.material.emissiveIntensity = 0.12 + 0.25 * (bad > 0.15 ? (reduced ? 1 : 0.6 + 0.4 * Math.sin(clock * 4)) : 0.3); crah[k].grille.material.color.set(bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan); crah[k].grille.material.opacity = 0.12 + 0.35 * u.flow_factor * u.fan_pct / 100; });
         // plumes on hot racks
@@ -730,7 +736,7 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd })
         const sel = selRef.current;
         const hotSet = new Set(snap.racks.map((r, k) => [r.status === 'critical' ? 1000 + r.gpu_temp_c : r.status === 'elevated' ? r.gpu_temp_c : -1, k]).filter(x => x[0] > 0).sort((a, b) => b[0] - a[0]).slice(0, 4).map(x => x[1]));
         for (let i = 0; i < 64; i++) {
-          const rk = snap.racks[i]; const d = labelEls[i]; const showIt = o.labels || i === sel || hotSet.has(i);
+          const rk = snap.racks[i]; const d = labelEls[i]; const impR = impactRef && impactRef.current ? impactRef.current.racks.find(r => r.idx === i) : null; const showIt = o.labels || i === sel || hotSet.has(i) || !!impR;
           if (!showIt) { d.style.display = 'none'; continue; }
           const [x, z] = rackPos(i); const [sx, sy, vis] = project(x, 2.25, z);
           if (!vis) { d.style.display = 'none'; continue; }
@@ -739,6 +745,7 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd })
           d.style.color = rk.status === 'critical' ? C.red : rk.status === 'elevated' ? C.amber : (i === sel ? C.cyan : '#7f93ab');
           d.style.padding = strong ? '2px 6px' : '0'; d.style.borderRadius = '4px'; d.style.background = strong ? 'rgba(7,11,19,.78)' : 'transparent'; d.style.border = strong ? '1px solid ' + (rk.status === 'critical' ? 'rgba(255,89,110,.5)' : rk.status === 'elevated' ? 'rgba(255,187,85,.45)' : 'rgba(67,217,245,.45)') : 'none';
           d.textContent = strong ? rk.rack_id + '  ' + rk.gpu_temp_c.toFixed(1) + '°C' : rk.rack_id;
+          if (impR) { const ic = impactColor(impR.d); d.style.color = ic; d.style.padding = '2px 6px'; d.style.background = 'rgba(7,11,19,.85)'; d.style.border = '1px solid ' + ic + '88'; d.textContent = rk.rack_id + '  ' + impR.before.gpu_c.toFixed(1) + ' → ' + rk.gpu_temp_c.toFixed(1) + '°C  ' + (impR.d < 0 ? '▼' : impR.d > 0 ? '▲' : '') + Math.abs(impR.d).toFixed(1) + (impR.moved.length ? (impR.role === 'target' ? '  +' : '  −') + impR.moved.join(', ') : ''); }
         }
         rowLabels.forEach((d, r) => { const [sx, sy, vis] = project(X0 - 0.55, 0.05, rowZ0(r) + 0.6); d.style.display = vis ? 'block' : 'none'; d.style.transform = 'translate(' + sx + 'px,' + sy + 'px) translate(-50%,-50%)'; });
         unitLabels.forEach((d, k) => { const u = snap.cooling[k]; const [sx, sy, vis] = project(9.0, 2.5, 3.0 + 4.8 * k); d.style.display = vis ? 'block' : 'none'; d.style.transform = 'translate(' + sx + 'px,' + sy + 'px) translate(-50%,-100%)'; const bad = 1 - u.effectiveness; d.style.color = bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan; d.textContent = u.unit_id + ' ' + Math.round(u.effectiveness * 100) + '% · ' + u.supply_temp_c.toFixed(1) + '°C'; });
@@ -827,10 +834,10 @@ function stdbSnapshot(conn, prevField) {
 }
 function useStdbMirror(snapRef, bump) {
   const [st, setSt] = React.useState({ status: 'connecting', seq: 0, lastAt: 0, identity: null, error: null });
-  const dataRef = React.useRef({ incidents: {}, plans: {}, events: [] });
+  const dataRef = React.useRef({ incidents: {}, plans: {}, events: [] }); const lastBeat = React.useRef(0);
   React.useEffect(() => {
     let conn = null, dead = false, pending = false;
-    const rebuild = () => { pending = false; if (dead || !conn) return; const s = stdbSnapshot(conn, snapRef.current && snapRef.current.source === 'spacetimedb' ? snapRef.current.field : null); if (s) { snapRef.current = s; setSt(x => ({ ...x, status: 'live', seq: s.seq, lastAt: Date.now(), lagMs: Math.max(0, Date.now() - s.wallTs * 1000) })); bump(); } };
+    const rebuild = () => { pending = false; if (dead || !conn) return; const s = stdbSnapshot(conn, snapRef.current && snapRef.current.source === 'spacetimedb' ? snapRef.current.field : null); if (s) { snapRef.current = s; lastBeat.current = Date.now(); setSt(x => ({ ...x, status: 'live', seq: s.seq, lastAt: Date.now(), lagMs: Math.max(0, Date.now() - s.wallTs * 1000) })); bump(); } };
     const schedule = () => { if (!pending) { pending = true; setTimeout(rebuild, 0); } };
     const refreshOps = () => {
       if (!conn) return; const inc = {}, pl = {};
@@ -840,21 +847,30 @@ function useStdbMirror(snapRef, bump) {
       dataRef.current = { incidents: inc, plans: pl, events: [...conn.db.auditEvent.iter()].sort((a, b) => Number(b.eventId - a.eventId)).slice(0, 80) };
       bump();
     };
-    try {
-      let token; try { token = localStorage.getItem('gp_stdb_token') || undefined; } catch (e) { }
-      conn = GP_STDB.DbConnection.builder().withUri(STDB_URI).withDatabaseName(STDB_DB).withToken(token)
-        .onConnect((c, identity, tok) => {
-          try { localStorage.setItem('gp_stdb_token', tok); } catch (e) { }
-          setSt(x => ({ ...x, status: 'subscribing', identity: identity.toHexString(), error: null }));
-          c.db.facilitySummary.onUpdate(schedule); c.db.facilitySummary.onInsert(schedule);
-          ['incident', 'plan', 'auditEvent'].forEach(tb => { c.db[tb].onInsert(refreshOps); c.db[tb].onDelete(refreshOps); if (c.db[tb].onUpdate) c.db[tb].onUpdate(refreshOps); });
-          c.subscriptionBuilder().onApplied(() => { refreshOps(); rebuild(); }).onError((ctx, e) => setSt(x => ({ ...x, status: 'error', error: String(e && e.message || e) }))).subscribe(STDB_TABLES);
-        })
-        .onConnectError((ctx, e) => setSt(x => ({ ...x, status: 'error', error: String(e && e.message || e) })))
-        .onDisconnect(() => { if (!dead) setSt(x => ({ ...x, status: 'disconnected' })); })
-        .build();
-    } catch (e) { setSt(x => ({ ...x, status: 'error', error: String(e.message || e) })); }
-    return () => { dead = true; try { conn && conn.disconnect(); } catch (e) { } };
+    let retry = 0, timer = null;
+    const connect = () => {
+      if (dead || window.GP_NO_STDB) return;
+      try {
+        let token; try { token = localStorage.getItem('gp_stdb_token') || undefined; } catch (e) { }
+        conn = GP_STDB.DbConnection.builder().withUri(STDB_URI).withDatabaseName(STDB_DB).withToken(token)
+          .onConnect((c, identity, tok) => {
+            retry = 0;
+            try { localStorage.setItem('gp_stdb_token', tok); } catch (e) { }
+            setSt(x => ({ ...x, status: 'subscribing', identity: identity.toHexString(), error: null }));
+            c.db.facilitySummary.onUpdate(schedule); c.db.facilitySummary.onInsert(schedule);
+            ['incident', 'plan', 'auditEvent'].forEach(tb => { c.db[tb].onInsert(refreshOps); c.db[tb].onDelete(refreshOps); if (c.db[tb].onUpdate) c.db[tb].onUpdate(refreshOps); });
+            c.subscriptionBuilder().onApplied(() => { refreshOps(); rebuild(); }).onError((ctx, e) => setSt(x => ({ ...x, status: 'error', error: String(e && e.message || e) }))).subscribe(STDB_TABLES);
+          })
+          .onConnectError((ctx, e) => { setSt(x => ({ ...x, status: 'reconnecting', error: String(e && e.message || e) })); later(); })
+          .onDisconnect(() => { if (!dead) { setSt(x => ({ ...x, status: 'reconnecting' })); later(); } })
+          .build();
+      } catch (e) { setSt(x => ({ ...x, status: 'reconnecting', error: String(e.message || e) })); later(); }
+    };
+    const later = () => { if (dead || timer) return; timer = setTimeout(() => { timer = null; connect(); }, Math.min(15000, 1000 * 2 ** retry++)); };
+    // also recover from silent drops: no facility update for 10 s while connected
+    const watchdog = setInterval(() => { if (!dead && lastBeat.current && Date.now() - lastBeat.current > 10000 && !timer) { lastBeat.current = 0; try { conn && conn.disconnect(); } catch (e) { } setSt(x => ({ ...x, status: 'reconnecting' })); later(); } }, 3000);
+    connect();
+    return () => { dead = true; clearTimeout(timer); clearInterval(watchdog); try { conn && conn.disconnect(); } catch (e) { } };
   }, []);
   const live = st.status === 'live' && Date.now() - st.lastAt < 5000;
   return { ...st, live, dataRef };
@@ -916,6 +932,50 @@ function useGridpilot() {
   }, [url, wsUrl, api]);
   const merged = state ? { ...state, incident: mergeIncident(state.incident, stdb.dataRef.current) } : state;
   return { url, error, snapRef, twinRef, gpusRef, tickN, state: merged, conn, api, stdb };
+}
+
+
+// Measured effect of the last applied plan: rack state captured just before apply vs the live snapshot now.
+function computeImpact(inc, snap) {
+  if (!inc || !snap) return null;
+  const ex = (inc.executions || []).filter(x => x.data && x.data.impact_before).slice(-1)[0]; if (!ex) return null;
+  const ib = ex.data.impact_before; const age = Date.now() / 1000 - ib.wall_ts;
+  if (inc.state === 'CLOSED' && age > 1800) return null;
+  const plan = (inc.plans || []).find(p => p.version === ex.plan_version) || (inc.plans || []).slice(-1)[0];
+  const byId = {}; snap.racks.forEach((r, i) => { byId[r.rack_id] = [r, i]; });
+  const racks = Object.entries(ib.racks).map(([rid, b]) => { const hit = byId[rid]; if (!hit) return null; const [r, idx] = hit;
+    const moved = b.role === 'source' ? b.workloads.filter(w => !r.workloads.includes(w)) : b.role === 'target' ? r.workloads.filter(w => !b.workloads.includes(w)) : [];
+    return { rid, idx, role: b.role, before: b, now: { gpu_c: r.gpu_temp_c, inlet_c: r.inlet_temp_c, power_kw: r.power_kw, status: r.status }, d: +(r.gpu_temp_c - b.gpu_c).toFixed(1), dp: +(r.power_kw - b.power_kw).toFixed(2), moved }; }).filter(Boolean);
+  const units = Object.entries(ib.units || {}).map(([uid, b]) => { const c = snap.cooling.find(x => x.unit_id === uid); return c && { uid, before: b, now: { fan_pct: c.fan_pct, supply_c: c.supply_temp_c } }; }).filter(Boolean);
+  const main = racks.find(r => r.role === 'incident') || racks[0];
+  return { ex, plan, age, simAge: snap.t - ib.sim_t, racks, units, main, forecastEnd: plan && plan.forecast ? plan.forecast.final_gpu_c : null, recovered: main ? main.now.gpu_c < 80 : false };
+}
+const ROLE_TXT = { incident: 'hotspot', source: 'load moved off', target: 'load moved in', throttled: 'power capped', cooled: 'fan boosted aisle' };
+function impactColor(d) { return d <= -1 ? C.mint : d >= 1 ? C.amber : C.cyan; }
+function ImpactRows({ imp, compact }) {
+  return <div className="flex flex-col gap-1">{imp.racks.map(r => { const lo = Math.min(r.before.gpu_c, r.now.gpu_c, 50), hi = Math.max(r.before.gpu_c, r.now.gpu_c, 95); const x = (v) => ((v - lo) / (hi - lo)) * 100;
+    return <div key={r.rid} className="grid items-center gap-2" style={{ gridTemplateColumns: compact ? '42px 1fr 92px' : '42px 110px 1fr 120px' }}>
+      <span style={{ font: '600 11px ' + MONO, color: C.text }}>{r.rid}</span>
+      {!compact && <span className="truncate" style={{ font: '10px ' + SANS, color: C.dim }} title={r.moved.join(', ')}>{ROLE_TXT[r.role] || r.role}{r.moved.length ? ' · ' + r.moved.length : ''}</span>}
+      <div className="relative" style={{ height: 10 }}>
+        <div className="absolute" style={{ left: 0, right: 0, top: 4, height: 2, background: 'rgba(110,150,190,.15)', borderRadius: 2 }} />
+        <div className="absolute" style={{ left: Math.min(x(r.before.gpu_c), x(r.now.gpu_c)) + '%', width: Math.abs(x(r.now.gpu_c) - x(r.before.gpu_c)) + '%', top: 4, height: 2, background: impactColor(r.d), borderRadius: 2 }} />
+        <div className="absolute" title={'before ' + r.before.gpu_c + '°C'} style={{ left: 'calc(' + x(r.before.gpu_c) + '% - 3px)', top: 2, width: 6, height: 6, borderRadius: 6, border: '1.5px solid ' + C.mute, background: C.bg }} />
+        <div className="absolute" title={'now ' + r.now.gpu_c + '°C'} style={{ left: 'calc(' + x(r.now.gpu_c) + '% - 4px)', top: 1, width: 8, height: 8, borderRadius: 8, background: impactColor(r.d), boxShadow: '0 0 8px ' + impactColor(r.d) }} />
+      </div>
+      <span className="gp-nw" style={{ font: '10.5px ' + MONO, color: C.mute, textAlign: 'right' }}>{r.before.gpu_c.toFixed(1)}→<b style={{ color: C.text, fontWeight: 600 }}>{r.now.gpu_c.toFixed(1)}</b> <span style={{ color: impactColor(r.d) }}>{r.d < 0 ? '▼' : r.d > 0 ? '▲' : '·'}{Math.abs(r.d).toFixed(1)}</span></span>
+    </div>; })}
+    {imp.units.map(x => <div key={x.uid} style={{ font: '10.5px ' + MONO, color: C.mute }}>{x.uid} fan {Math.round(x.before.fan_pct)}% → <span style={{ color: C.text }}>{Math.round(x.now.fan_pct)}%</span> · supply {x.before.supply_c.toFixed(1)} → {x.now.supply_c.toFixed(1)}°C</div>)}
+  </div>;
+}
+function ImpactHud({ imp }) {
+  if (!imp) return null; const m = imp.main;
+  return <div className="rounded-lg p-3" style={{ width: 340, background: 'rgba(10,16,26,.9)', border: '1px solid ' + (imp.recovered ? 'rgba(79,224,165,.4)' : 'rgba(67,217,245,.3)') }}>
+    <div className="flex items-baseline gap-2"><Label color={imp.recovered ? C.mint : C.cyan}>Strategy impact · measured</Label><span className="ml-auto" style={{ font: '10px ' + MONO, color: C.dim }}>{imp.plan ? imp.plan.plan_id + ' v' + imp.plan.version : imp.ex.id} · applied {fmtT(Math.max(0, imp.simAge))} ago</span></div>
+    {m && <div className="flex items-baseline gap-2 mt-1.5"><span style={{ font: '600 20px ' + MONO, color: impactColor(m.d), letterSpacing: '-.02em' }}>{m.d < 0 ? '▼' : '▲'}{Math.abs(m.d).toFixed(1)}°C</span><span style={{ font: '11px ' + SANS, color: C.mute }}>{m.rid} GPU hotspot{imp.forecastEnd != null ? ' · forecast end ' + imp.forecastEnd + '°C' : ''}</span></div>}
+    <div className="mt-2"><ImpactRows imp={imp} compact /></div>
+    <div style={{ font: '9.5px ' + MONO, color: C.dim, marginTop: 6 }}>before = rack state captured at apply · now = live telemetry · halos on racks in the scene</div>
+  </div>;
 }
 
 function Metric({ label, value, unit, sub, tone }) {
@@ -1010,6 +1070,11 @@ function IncidentPanel({ g, setModal, toast }) {
       </div>}
     </div>}
     {!plan && inc.state !== 'CLOSED' && <div className="px-4 py-3" style={{ borderBottom: '1px solid ' + C.line, font: '11.5px/1.5 ' + SANS, color: C.mute }}>Waiting for CREAO to propose a plan. Plans only appear from real agent tool calls (or an operator what-if in Agent Operations).</div>}
+    {(() => { const imp = computeImpact(inc, snap); return imp ? <div className="px-4 py-3" style={{ borderBottom: '1px solid ' + C.line }}>
+      <div className="flex justify-between items-baseline"><Label color={imp.recovered ? C.mint : C.cyan}>Strategy impact · measured</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>applied {fmtT(Math.max(0, imp.simAge))} ago (sim)</span></div>
+      <div className="mt-2"><ImpactRows imp={imp} /></div>
+      {imp.main && imp.forecastEnd != null && <div style={{ font: '10.5px ' + MONO, color: C.mute, marginTop: 6 }}>{imp.main.rid}: forecast end {imp.forecastEnd}°C · measured now {imp.main.now.gpu_c.toFixed(1)}°C · inlet {imp.main.before.inlet_c.toFixed(1)} → {imp.main.now.inlet_c.toFixed(1)}°C{imp.main.now.inlet_c > 27 ? ' (inlet stays warm until the cooling unit is repaired)' : ''}</div>}
+    </div> : null; })()}
     {exec && <div className="px-4 py-3" style={{ borderBottom: '1px solid ' + C.line }}>
       <div className="flex justify-between"><Label>Execution {exec.id}</Label><span style={{ font: '10px ' + MONO, color: exec.state === 'rolled_back' ? C.red : C.mint }}>{exec.state}</span></div>
       <div className="mt-1.5 flex flex-col gap-0.5">{(exec.data.steps || []).map((s, i) => <div key={i} style={{ font: '10.5px ' + MONO, color: s.ok ? '#a9bbcf' : C.red }}>{s.ok ? '✓' : '✗'} {s.name} · {s.detail}</div>)}</div>
@@ -1631,10 +1696,12 @@ function ControlRoom({ g, setModal, toast, narrow }) {
   const set = (k, v) => setOpts(o => ({ ...o, [k]: v }));
   const camBtn = (kind, label) => <button onClick={() => setCmd(c => ({ n: c.n + 1, kind }))} style={{ font: '500 10.5px ' + MONO, color: C.mute, padding: '4px 8px', borderRadius: 6, border: '1px solid ' + C.line }}>{label}</button>;
   const lat = snap ? snap.latency : {};
+  const imp = computeImpact(g.state && g.state.incident, snap); const impactRef = React.useRef(null); impactRef.current = imp;
   return <div className={'flex flex-col min-h-0 flex-1' + (narrow ? ' overflow-auto' : '')}>
     <div className={narrow ? 'flex flex-col' : 'flex flex-1 min-h-0'}>
       <div className="relative min-w-0" style={narrow ? { height: focus ? 'calc(var(--mana-app-height, 82vh) - 60px)' : 600, flexShrink: 0 } : { flex: '1 1 auto' }}>
-        <DataCenterScene snapRef={g.snapRef} gpusRef={g.gpusRef} opts={opts} selected={sel} onSelect={onSelect} camCmd={cmd} />
+        <DataCenterScene snapRef={g.snapRef} gpusRef={g.gpusRef} opts={opts} selected={sel} onSelect={onSelect} camCmd={cmd} impactRef={impactRef} />
+        {imp && !selR && <div className="absolute left-3" style={{ bottom: 78 }}><ImpactHud imp={imp} /></div>}
         <div className="absolute left-3 top-3 flex flex-col gap-2 pointer-events-auto" style={{ maxWidth: narrow ? 'calc(100% - 24px)' : undefined }}>
           <div className="flex rounded-full p-0.5" style={{ background: 'rgba(16,24,38,.85)', border: '1px solid ' + C.line2 }}>
             {['thermal', 'airflow', 'power', 'workload', 'combined'].map(m => <button key={m} onClick={() => set('mode', m)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '5px 11px', letterSpacing: '.02em', color: opts.mode === m ? '#04121a' : C.mute, background: opts.mode === m ? C.cyan : 'transparent' }}>{m[0].toUpperCase() + m.slice(1)}</button>)}
@@ -1653,7 +1720,7 @@ function ControlRoom({ g, setModal, toast, narrow }) {
         <div className="absolute right-3" style={{ top: 146, width: 330, pointerEvents: 'none' }}><LiveReasoning g={g} compact /></div>
         <div className="absolute left-3 bottom-3 px-3 py-2 rounded-lg" style={{ background: 'rgba(16,24,38,.82)', border: '1px solid ' + C.line, font: '10px ' + MONO, color: C.mute }}>
           <div className="flex items-center gap-2"><span>18°C</span><span style={{ width: 130, height: 6, borderRadius: 3, background: 'linear-gradient(90deg,#4087ff,#43D9F5,#4FE0A5,#FFBB55,#ff7340,#FF596E)' }} /><span>41°C</span></div>
-          <div style={{ marginTop: 4, color: C.dim }}>Floor: air temperature field · Rack edges: {opts.mode === 'power' ? 'power kW' : opts.mode === 'workload' ? 'GPU utilization' : 'GPU hotspot / status'}</div>
+          <div style={{ marginTop: 4, color: C.dim }}>Floor: air temperature · Racks: {opts.mode === 'power' ? 'power kW' : opts.mode === 'workload' ? 'GPU utilization' : 'GPU hotspot (52–92°C), LED = status'}</div>
           <div style={{ color: C.dim }}>Approximate 2D thermal/airflow model · not CFD</div>
         </div>
         {selR && <div className="absolute right-3 bottom-3 w-[260px] rounded-lg p-3" style={{ background: 'rgba(16,24,38,.92)', border: '1px solid rgba(67,217,245,.35)' }}>
@@ -1702,6 +1769,12 @@ function NewInvoice({ g, toast, onClose, onDone }) {
   </Modal>;
 }
 
+function FinSec({ title, open, children, right }) {
+  const [o, setO] = React.useState(!!open);
+  return <div style={{ borderTop: '1px solid ' + C.line }}>
+    <button onClick={() => setO(!o)} className="w-full flex items-center gap-2 py-2.5 text-left"><span style={{ color: C.dim, font: '10px ' + MONO, width: 10 }}>{o ? '▾' : '▸'}</span><Label color={C.mute}>{title}</Label><span className="ml-auto">{right}</span></button>
+    {o && <div className="pb-3">{children}</div>}</div>;
+}
 function FinanceDesk({ g, toast, narrow }) {
   const st = g.state; const D = st && st.desk; const inc = st && st.incident;
   const [sub, setSub] = React.useState('inbox'); const [sel, setSel] = React.useState(null); const [note, setNote] = React.useState(''); const [busy, setBusy] = React.useState(false);
@@ -1714,7 +1787,7 @@ function FinanceDesk({ g, toast, narrow }) {
   const agentRecs = (i) => i.decisions.filter(d => d.kind === 'agent_recommendation');
   const drafts = (i) => i.decisions.filter(d => d.kind === 'dispute_draft');
   const apRun = (st.specialists || []).find(s => s.kind === 'ap_analyst');
-  const tabs = [['inbox', 'Invoice inbox', pending.length], ['explorer', 'Cost explorer'], ['incidents', 'Incident costs'], ['ledger', 'Ledger'], ['proof', 'Controls & proof']];
+  const tabs = [['inbox', 'Inbox'], ['explorer', 'Cost explorer'], ['incidents', 'Incident costs'], ['ledger', 'Ledger'], ['proof', 'Controls & proof']];
   const chip = (txt, color) => <span style={{ font: '600 9.5px ' + MONO, color, border: '1px solid ' + color + '66', borderRadius: 4, padding: '1px 6px', whiteSpace: 'nowrap' }}>{txt}</span>;
   const dec = (d) => ({ approve: C.mint, short_pay: C.amber, dispute: C.red, hold: C.red }[d] || C.mute);
   // explorer data
@@ -1731,72 +1804,98 @@ function FinanceDesk({ g, toast, narrow }) {
   const incRows = incIds.map(id => { const invs = D.invoices.filter(i => i.incident === id); const acc = D.journal.filter(j => (j.source || '').startsWith('ACCRUAL-' + id)).reduce((a, j) => a + j.lines.filter(l => l.acct !== '2100').reduce((x, l) => x + (l.dr || 0), 0), 0);
     return { id, accrued: acc, booked: rows.filter(r => r.incident === id).reduce((a, r) => a + r.usd, 0), invoiced: invs.reduce((a, i) => a + i.amount, 0), paid: invs.filter(i => i.status === 'paid').reduce((a, i) => a + i.amount, 0), disputed: invs.filter(i => /disput|held/.test(i.status)).length, invs }; });
   const plan = inc && inc.plans && inc.plans.slice(-1)[0]; const b52 = D.budgets['5200'];
+  const needs = D.invoices.filter(x => !['paid', 'disputed_resolved', 'approved'].includes(x.status));
+  const ready = D.invoices.filter(x => x.status === 'approved');
+  const closed = D.invoices.filter(x => ['paid', 'disputed_resolved'].includes(x.status));
+  const queueUsd = ready.reduce((a, x) => a + (x.analysis ? x.analysis.amount : x.amount), 0);
+  const alerts = D.alerts.filter(a => a.status === 'open');
+  const disagree = (x) => { const r = agentRecs(x).slice(-1)[0]; return r && x.analysis && r.decision !== x.analysis.decision; };
+  const kpi = (label, value, color, sub) => <div className="px-4 py-2" style={{ borderLeft: '1px solid ' + C.line }}><div style={{ font: '9.5px ' + MONO, letterSpacing: '.14em', color: C.dim, textTransform: 'uppercase' }}>{label}</div><div className="gp-nw" style={{ font: '500 17px ' + MONO, color: color || C.text, marginTop: 2 }}>{value}{sub ? <span style={{ font: '10.5px ' + MONO, color: C.dim, marginLeft: 6 }}>{sub}</span> : null}</div></div>;
+  const Row = (x) => { const on = inv && inv.id === x.id; const d = x.analysis && x.analysis.decision;
+    return <button onClick={() => setSel(x.id)} className="w-full text-left px-4 py-2.5 flex items-center gap-3" style={{ background: on ? 'rgba(67,217,245,.07)' : 'transparent', boxShadow: on ? 'inset 2px 0 0 ' + C.cyan : 'none', borderBottom: '1px solid ' + C.line }}>
+      <span style={{ width: 6, height: 6, borderRadius: 6, flexShrink: 0, background: ST_COLOR[x.status] || C.mute }} />
+      <div className="min-w-0 flex-1"><div className="flex justify-between gap-2"><span style={{ font: '600 11.5px ' + MONO, color: C.text }}>{x.id}</span><span style={{ font: '500 11.5px ' + MONO, color: C.text }}>{fmt$(x.amount)}</span></div>
+        <div className="flex justify-between gap-2 mt-0.5"><span className="truncate" style={{ font: '11px ' + SANS, color: C.mute }}>{x.vendor_name}{x.incident ? ' · ' + x.incident : ''}</span><span className="gp-nw" style={{ font: '10px ' + MONO, color: disagree(x) ? C.amber : ST_COLOR[x.status] || C.mute }}>{disagree(x) ? 'agent disagrees' : x.status.replace(/_/g, ' ')}</span></div></div>
+    </button>; };
+  const group = (title, list) => list.length ? <div><div className="px-4 pt-3 pb-1.5 flex justify-between"><Label>{title}</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>{list.length}</span></div>{list.map(x => <React.Fragment key={x.id}>{Row(x)}</React.Fragment>)}</div> : null;
   return <div className="flex-1 min-h-0 flex flex-col" style={{ background: C.bg }}>
-    <div className="flex items-center gap-1 px-4 pt-3 pb-2 flex-wrap" style={{ borderBottom: '1px solid ' + C.line }}>
-      <div className="mr-3"><Label color={C.cyan}>Hyphenate track · the Hyphenated Enterprise</Label><div style={{ font: '500 12px ' + SANS, color: C.text, marginTop: 2 }}>Atlas Compute's AP analyst and cost controller seats, run autonomously. The human controller signs off.</div></div>
-      {tabs.map(([k, l, n]) => <button key={k} onClick={() => setSub(k)} className="rounded-full" style={{ font: '600 11px ' + SANS, padding: '5px 12px', color: sub === k ? '#04121a' : C.mute, background: sub === k ? C.cyan : 'transparent', border: '1px solid ' + (sub === k ? C.cyan : C.line) }}>{l}{n != null ? ' · ' + n : ''}</button>)}
-      <div className="ml-auto flex gap-2 items-center">
-        <span style={{ font: '10.5px ' + MONO, color: C.mute }}>score {D.score.correct}/{D.score.total} · planted errors caught {D.score.caught}/{D.score.planted_errors}</span>
-        <Btn small disabled={busy} onClick={() => setNewInv(true)}>+ Test invoice</Btn>
-        <Btn small disabled={busy} onClick={() => act('/api/finance/ap-review', {}, 'AP review started')}>Run AP review (CREAO)</Btn>
-        <Btn small tone="mint" disabled={busy || !approved.length} onClick={() => act('/api/finance/payment-run', {}, 'Payment run complete')}>Payment run · {approved.length}</Btn>
+    <div className="flex-shrink-0" style={{ borderBottom: '1px solid ' + C.line, background: 'rgba(16,24,38,.55)' }}>
+      <div className="flex items-center gap-3 px-4 pt-3 flex-wrap">
+        <div className="min-w-0"><div style={{ font: '600 14px ' + SANS, color: C.text }}>Finance desk</div><div style={{ font: '11px ' + SANS, color: C.mute }}>AP analyst and cost controller seats run autonomously. You sign off.</div></div>
+        <div className="ml-auto flex gap-2 flex-wrap"><Btn small disabled={busy} onClick={() => setNewInv(true)}>+ Test invoice</Btn><Btn small disabled={busy} onClick={() => act('/api/finance/ap-review', {}, 'AP review started')}>Run AP review</Btn><Btn small tone="mint" disabled={busy || !approved.length} onClick={() => act('/api/finance/payment-run', {}, 'Payment run complete')}>Pay {approved.length} · {fmt$(queueUsd)}</Btn></div>
       </div>
+      <div className="flex flex-wrap mt-2" style={{ marginLeft: -1 }}>
+        {kpi('Needs you', needs.length, needs.length ? C.amber : C.mint)}{kpi('Ready to pay', ready.length, C.text, fmt$(queueUsd))}{kpi('Burst budget left', b52 ? fmt$(b52.budget - b52.actual) : '—', b52 && b52.actual > b52.budget ? C.red : C.text)}{kpi('Accuracy', D.score.correct + '/' + D.score.total, C.mint, D.score.caught + '/' + D.score.planted_errors + ' errors caught')}
+        {alerts.length > 0 && <button onClick={() => setSub(sub === 'alerts' ? 'inbox' : 'alerts')} className="px-4 py-2 text-left" style={{ borderLeft: '1px solid ' + C.line }}><div style={{ font: '9.5px ' + MONO, letterSpacing: '.14em', color: C.dim, textTransform: 'uppercase' }}>Alerts</div><div style={{ font: '500 17px ' + MONO, color: alerts.some(a => a.severity === 'high') ? C.red : C.amber, marginTop: 2 }}>{alerts.length} <span style={{ font: '10.5px ' + SANS, color: C.cyan }}>{sub === 'alerts' ? 'hide' : 'review'}</span></div></button>}
+      </div>
+      <div className="flex gap-5 px-4 mt-1">{tabs.map(([k, l]) => <button key={k} onClick={() => setSub(k)} style={{ font: '600 11.5px ' + SANS, padding: '8px 0 9px', color: sub === k ? C.text : C.mute, boxShadow: sub === k ? 'inset 0 -2px 0 ' + C.cyan : 'none' }}>{l}</button>)}</div>
     </div>
-    {D.alerts.filter(a => a.status === 'open').slice(0, 3).map(a => <div key={a.id} className="px-4 py-1.5" style={{ font: '11px ' + MONO, color: a.severity === 'high' ? C.red : C.amber, background: a.severity === 'high' ? 'rgba(255,89,110,.06)' : 'rgba(255,187,85,.05)', borderBottom: '1px solid ' + C.line }}>▲ {a.kind.replace(/_/g, ' ')} · {a.text}</div>)}
     {newInv && <NewInvoice g={g} toast={toast} onClose={() => setNewInv(false)} onDone={(iid) => { setNewInv(false); setSub('inbox'); setSel(iid); }} />}
-    {sub === 'inbox' && <div className={'flex-1 min-h-0 grid' + (narrow ? ' overflow-auto' : '')} style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(300px, 0.9fr) minmax(420px, 1.6fr)', gridAutoRows: narrow ? 'max-content' : undefined }}>
-      <div className="overflow-auto" style={narrow ? { maxHeight: 280, borderBottom: '1px solid ' + C.line } : { borderRight: '1px solid ' + C.line }}>
-        {apRun && <div className="px-3 py-2" style={{ borderBottom: '1px solid ' + C.line, font: '10.5px ' + MONO, color: C.mute }}>CREAO AP Analyst · {apRun.status}{apRun.creao_run_id ? ' · run ' + apRun.creao_run_id.slice(0, 8) : ''}</div>}
-        {D.invoices.map(i => <button key={i.id} onClick={() => setSel(i.id)} className="w-full text-left px-3 py-2.5" style={{ borderBottom: '1px solid ' + C.line, background: inv && inv.id === i.id ? 'rgba(67,217,245,.06)' : 'transparent', opacity: ['paid', 'disputed_resolved'].includes(i.status) ? 0.55 : 1 }}>
-          <div className="flex justify-between gap-2"><span style={{ font: '600 11.5px ' + MONO, color: C.text }}>{i.id}</span><span style={{ font: '500 11.5px ' + MONO, color: C.text }}>{fmt$(i.amount)}</span></div>
-          <div className="flex justify-between gap-2 mt-0.5"><span className="truncate" style={{ font: '10.5px ' + SANS, color: C.mute }}>{i.vendor_name}{i.incident ? ' · ' + i.incident : ''} · {i.date}</span>{chip(i.status.replace(/_/g, ' '), ST_COLOR[i.status] || C.mute)}</div>
-          {i.analysis && !['approved', 'paid'].includes(i.status) && <div className="mt-1" style={{ font: '10px ' + MONO, color: dec(i.analysis.decision) }}>→ {i.analysis.decision.replace('_', ' ')} {i.analysis.decision !== 'hold' ? fmt$(i.analysis.amount) : ''}{agentRecs(i).length ? ' · CREAO ' + agentRecs(i).slice(-1)[0].decision : ''}</div>}
-        </button>)}
+    {sub === 'alerts' && <div className="flex-1 overflow-auto p-4 flex flex-col gap-2" style={{ maxWidth: 900 }}>{alerts.map(a => <div key={a.id} className="flex gap-3 p-3 rounded-lg" style={{ background: C.p1, border: '1px solid ' + C.line }}>
+      <span style={{ width: 6, height: 6, borderRadius: 6, marginTop: 6, flexShrink: 0, background: a.severity === 'high' ? C.red : C.amber }} />
+      <div className="min-w-0 flex-1"><div style={{ font: '600 11px ' + MONO, color: a.severity === 'high' ? C.red : C.amber, letterSpacing: '.06em' }}>{a.kind.replace(/_/g, ' ').toUpperCase()}</div><div style={{ font: '12px/1.55 ' + SANS, color: C.text, marginTop: 2 }}>{a.text}</div></div>
+      {a.data && a.data.invoice_id && <Btn small onClick={() => { setSel(a.data.invoice_id); setSub('inbox'); }}>Open</Btn>}</div>)}</div>}
+    {sub === 'inbox' && <div className={'flex-1 min-h-0 grid' + (narrow ? ' overflow-auto' : '')} style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(280px, 340px) minmax(0, 1fr)', gridAutoRows: narrow ? 'max-content' : undefined }}>
+      <div className="overflow-auto" style={narrow ? { maxHeight: 300, borderBottom: '1px solid ' + C.line } : { borderRight: '1px solid ' + C.line }}>
+        {group('Needs your decision', needs)}{group('Ready to pay', ready)}{group('Closed', closed)}
+        {apRun && <div className="px-4 py-3" style={{ font: '10px ' + MONO, color: C.dim }}>CREAO AP Analyst · {apRun.status}{apRun.creao_run_id ? ' · run ' + apRun.creao_run_id.slice(0, 8) : ''}</div>}
       </div>
-      <div className={narrow ? 'p-4' : 'overflow-auto p-4'}>{inv ? <div className="flex flex-col gap-3">
-        <div className="flex justify-between items-start gap-3"><div><div style={{ font: '600 15px ' + MONO, color: C.text }}>{inv.id} <span style={{ color: C.mute, fontWeight: 400 }}>· {inv.vendor_name}</span></div>
-          <div style={{ font: '10.5px ' + MONO, color: C.dim, marginTop: 2 }}>issued {inv.date} · due {inv.due} · period {inv.period}{inv.po ? ' · ' + inv.po : ''} · from {inv.from_email || '—'} · remit {inv.remit_to || '—'}</div></div>{chip(inv.status.replace(/_/g, ' '), ST_COLOR[inv.status] || C.mute)}</div>
-        {inv.note && <div className="p-2.5 rounded" style={{ background: 'rgba(255,89,110,.06)', border: '1px solid rgba(255,89,110,.3)', font: '11.5px/1.5 ' + SANS, color: '#ffc2ca' }}>Message on invoice: “{inv.note}”</div>}
-        <Panel style={{ padding: 10 }}>{inv.lines.map((l, k) => <div key={k} className="flex justify-between" style={{ font: '11.5px ' + MONO, color: C.text }}><span style={{ color: C.mute }}>{l.sku}</span><span>{l.qty.toLocaleString()} × {fmt$(l.rate)} = {fmt$(l.usd)}</span></div>)}</Panel>
-        {inv.analysis && <><Label>Three-way match (contract × meter × invoice)</Label>
-          <div className="flex flex-col gap-1">{inv.analysis.checks.map((c, k) => <div key={k} className="flex gap-2" style={{ font: '11px/1.5 ' + MONO }}><span style={{ color: c.ok ? C.mint : (c.severity === 'info' ? C.mute : c.severity === 'high' ? C.red : C.amber), width: 12 }}>{c.ok ? '✓' : '✗'}</span><span style={{ color: C.text, width: 170, flexShrink: 0 }}>{c.name.replace(/_/g, ' ')}</span><span style={{ color: C.mute }}>{c.detail}{c.source ? <span style={{ color: C.dim }}> · {c.source}</span> : null}</span></div>)}</div>
-          <div className="p-3 rounded" style={{ background: C.p2, border: '1px solid ' + dec(inv.analysis.decision) + '55' }}><div className="flex justify-between"><Label color={dec(inv.analysis.decision)}>Recommendation · {inv.analysis.decision.replace('_', ' ')} {inv.analysis.decision !== 'hold' ? fmt$(inv.analysis.amount) : ''}</Label><span style={{ font: '10px ' + MONO, color: C.mute }}>sign-off: {inv.analysis.approver_required}</span></div>
-            <div style={{ font: '12px/1.55 ' + SANS, color: C.text, marginTop: 4 }}>{inv.analysis.reason}</div>{inv.analysis.segregation && <div style={{ font: '10.5px ' + MONO, color: C.amber, marginTop: 4 }}>Segregation of duties: {inv.analysis.segregation}</div>}</div></>}
-        {agentRecs(inv).map((d, k) => <div key={k} className="p-3 rounded" style={{ background: 'rgba(67,217,245,.05)', border: '1px solid rgba(67,217,245,.2)' }}><Label color={C.cyan}>CREAO AP Analyst · {d.decision} {fmt$(d.amount)} · {d.actor}</Label><div style={{ font: '11.5px/1.55 ' + SANS, color: '#c7d6e6', marginTop: 4 }}>{d.reason}</div></div>)}
-        {drafts(inv).slice(-1).map((d, k) => <div key={k} className="p-3 rounded" style={{ background: C.p2, border: '1px solid ' + C.line2 }}><Label>Dispute email draft (not sent)</Label><pre style={{ whiteSpace: 'pre-wrap', font: '11px/1.55 ' + SANS, color: C.text, margin: '6px 0 0' }}>{d.reason}</pre></div>)}
-        {!['paid', 'disputed_resolved', 'approved'].includes(inv.status) && <div className="flex flex-col gap-2">
-          <input value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => e.stopPropagation()} placeholder={inv.analysis && inv.analysis.decision === 'hold' ? "verified: called vendor at number on file, confirmed…" : 'Note for the audit trail (optional)'} className="rounded-full px-3 outline-none" style={{ background: C.p2, border: '1px solid ' + C.line2, color: C.text, font: '11.5px ' + SANS, height: 30 }} />
-          <div className="flex gap-2 flex-wrap"><Btn tone="mint" disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/approve', { note }, 'Approved and posted')}>Approve as controller</Btn>
-            <Btn tone="danger" disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/dispute', { note }, 'Disputed')}>Dispute</Btn>
-            <Btn disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/hold', { note }, 'Held')}>Hold</Btn></div></div>}
-        <div className="p-3 rounded" style={{ background: 'rgba(67,217,245,.04)', border: '1px solid rgba(67,217,245,.22)' }}>
-          <Label color={C.cyan}>Ask why · CREAO Finance Explainer defends the call, citing its sources</Label>
-          <div className="flex flex-col gap-2 mt-2">{inv.decisions.filter(d => d.kind === 'question' || d.kind === 'explanation').map((d, k) => <div key={k} style={{ font: (d.kind === 'question' ? '600 ' : '') + '11.5px/1.55 ' + SANS, color: d.kind === 'question' ? C.text : '#c7d6e6', paddingLeft: d.kind === 'question' ? 0 : 10, borderLeft: d.kind === 'question' ? 'none' : '2px solid rgba(67,217,245,.35)', whiteSpace: 'pre-wrap' }}>{d.kind === 'question' ? 'Q · ' : ''}{d.reason}<div style={{ font: '9.5px ' + MONO, color: C.dim, fontWeight: 400 }}>{d.actor} · {new Date(d.ts * 1000).toLocaleTimeString()}</div></div>)}
-            {(() => { const qs = inv.decisions.filter(d => d.kind === 'question' || d.kind === 'explanation'); const last = qs[qs.length - 1]; return last && last.kind === 'question' && Date.now() / 1000 - last.ts < 600 ? <div className="animate-pulse" style={{ font: '10.5px ' + MONO, color: C.cyan }}>CREAO is reading the contract, meter, vendor history and decision log… (about a minute)</div> : null; })()}
+      <div className={narrow ? 'p-4' : 'overflow-auto'}>{inv ? (() => { const a = inv.analysis; const rec = agentRecs(inv).slice(-1)[0]; const fails = a ? a.checks.filter(c => !c.ok) : []; const passes = a ? a.checks.filter(c => c.ok) : []; const open = !['paid', 'disputed_resolved', 'approved'].includes(inv.status); const qa = inv.decisions.filter(d => d.kind === 'question' || d.kind === 'explanation');
+        return <div key={inv.id} className="flex flex-col gap-4 p-5" style={{ maxWidth: 820 }}>
+          <div className="flex items-start gap-3"><div className="min-w-0 flex-1"><div style={{ font: '600 16px ' + MONO, color: C.text }}>{inv.id}</div><div style={{ font: '12px ' + SANS, color: C.mute, marginTop: 2 }}>{inv.vendor_name}{inv.incident ? ' · ' + inv.incident : ''} · due {inv.due}</div></div>
+            <div className="text-right"><div style={{ font: '500 20px ' + MONO, color: C.text }}>{fmt$(inv.amount)}</div><div style={{ font: '10.5px ' + MONO, color: ST_COLOR[inv.status] || C.mute, marginTop: 2 }}>{inv.status.replace(/_/g, ' ')}</div></div></div>
+          {inv.note && <div className="px-3 py-2 rounded-lg" style={{ background: 'rgba(255,89,110,.06)', border: '1px solid rgba(255,89,110,.28)', font: '12px/1.5 ' + SANS, color: '#ffc2ca' }}>Message on invoice: “{inv.note}”</div>}
+          {a && <div className="rounded-lg p-4" style={{ background: C.p1, border: '1px solid ' + dec(a.decision) + '55' }}>
+            <div className="flex items-baseline gap-2 flex-wrap"><span style={{ font: '600 15px ' + SANS, color: dec(a.decision) }}>{a.decision === 'short_pay' ? 'Short pay' : a.decision[0].toUpperCase() + a.decision.slice(1)}{a.decision !== 'hold' ? ' ' + fmt$(a.amount) : ''}</span><span style={{ font: '11px ' + SANS, color: C.dim }}>recommended by the matcher · sign-off {a.approver_required}</span></div>
+            <div style={{ font: '12.5px/1.6 ' + SANS, color: C.text, marginTop: 6 }}>{a.reason}</div>
+            {rec && <div className="mt-2" style={{ font: '11.5px/1.5 ' + SANS, color: rec.decision === a.decision ? C.mute : C.amber }}>{rec.decision === a.decision ? '✓ CREAO AP Analyst agrees' : '⚠ CREAO AP Analyst recommends ' + rec.decision + (rec.amount ? ' ' + fmt$(rec.amount) : '') + ' instead. You decide.'}</div>}
+            {a.segregation && <div style={{ font: '11px ' + SANS, color: C.amber, marginTop: 4 }}>Segregation of duties: {a.segregation}</div>}
+            {open && <div className="flex gap-2 flex-wrap mt-3 items-center">
+              <input value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => e.stopPropagation()} placeholder={a.decision === 'hold' ? 'Verified by callback to the number on file…' : 'Note for the audit trail (optional)'} className="flex-1 rounded-full px-3 outline-none" style={{ minWidth: 200, background: C.p2, border: '1px solid ' + C.line2, color: C.text, font: '11.5px ' + SANS, height: 30 }} />
+              <Btn tone="mint" disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/approve', { note }, 'Approved and posted')}>Approve</Btn>
+              <Btn tone="danger" disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/dispute', { note }, 'Disputed')}>Dispute</Btn>
+              <Btn disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/hold', { note }, 'Held')}>Hold</Btn></div>}
+          </div>}
+          <div><Label>Invoice lines</Label><div className="mt-1.5">{inv.lines.map((l, k) => <div key={k} className="grid gap-3 py-1.5" style={{ gridTemplateColumns: 'minmax(0,1fr) auto auto', borderBottom: '1px solid ' + C.line, font: '11.5px ' + MONO }}><span className="truncate" style={{ color: C.text }}>{l.sku}</span><span style={{ color: C.mute }}>{l.qty.toLocaleString()} × {fmt$(l.rate)}</span><span style={{ color: C.text, minWidth: 80, textAlign: 'right' }}>{fmt$(l.usd)}</span></div>)}</div></div>
+          {a && <div><Label>Three-way match · contract × meter × invoice</Label><div className="mt-1.5 flex flex-col">
+            {fails.concat(passes).map((c, k) => <div key={k} className="grid gap-3 py-1.5" title={c.source || ''} style={{ gridTemplateColumns: '14px 150px minmax(0,1fr)', borderBottom: '1px solid ' + C.line }}>
+              <span style={{ font: '11px ' + MONO, color: c.ok ? C.mint : c.severity === 'high' ? C.red : c.severity === 'info' ? C.mute : C.amber }}>{c.ok ? '✓' : '✗'}</span>
+              <span style={{ font: '11.5px ' + SANS, color: c.ok ? C.mute : C.text }}>{c.name.replace(/_/g, ' ')}</span>
+              <span style={{ font: '11.5px/1.45 ' + SANS, color: c.ok ? C.dim : C.text }}>{c.detail}</span></div>)}</div></div>}
+          <div>
+            {(rec || drafts(inv).length > 0) && <FinSec title="Agent notes" right={<span style={{ font: '10px ' + MONO, color: C.dim }}>{agentRecs(inv).length + drafts(inv).length}</span>}>
+              {agentRecs(inv).map((d, k) => <div key={k} className="mb-2" style={{ font: '12px/1.55 ' + SANS, color: '#c7d6e6' }}><span style={{ font: '600 10px ' + MONO, color: C.cyan }}>CREAO · {d.decision} {d.amount ? fmt$(d.amount) : ''}</span><div>{d.reason}</div></div>)}
+              {drafts(inv).slice(-1).map((d, k) => <div key={k}><div style={{ font: '600 10px ' + MONO, color: C.mute }}>DISPUTE EMAIL DRAFT · NOT SENT</div><pre style={{ whiteSpace: 'pre-wrap', font: '11.5px/1.55 ' + SANS, color: C.text, margin: '4px 0 0' }}>{d.reason}</pre></div>)}
+            </FinSec>}
+            <FinSec title="Ask why" open={qa.length > 0} right={<span style={{ font: '10px ' + MONO, color: C.dim }}>{qa.length ? qa.length : ''}</span>}>
+              <div className="flex flex-col gap-2">{qa.map((d, k) => <div key={k} style={{ font: (d.kind === 'question' ? '600 ' : '') + '12px/1.55 ' + SANS, color: d.kind === 'question' ? C.text : '#c7d6e6', paddingLeft: d.kind === 'question' ? 0 : 10, borderLeft: d.kind === 'question' ? 'none' : '2px solid rgba(67,217,245,.35)', whiteSpace: 'pre-wrap' }}>{d.reason}</div>)}
+                {(() => { const last = qa[qa.length - 1]; return last && last.kind === 'question' && Date.now() / 1000 - last.ts < 600 ? <div className="animate-pulse" style={{ font: '10.5px ' + MONO, color: C.cyan }}>CREAO is reading the contract, meter and vendor history…</div> : null; })()}</div>
+              <div className="flex gap-2 mt-2"><input value={askQ} onChange={e => setAskQ(e.target.value)} onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter' && askQ.trim()) { act('/api/finance/invoices/' + inv.id + '/ask', { question: askQ }, 'Asked'); setAskQ(''); } }} placeholder={'Why ' + (a ? a.decision.replace('_', ' ') : 'this') + '?'} className="flex-1 rounded-full px-3 outline-none" style={{ background: C.p2, border: '1px solid ' + C.line2, color: C.text, font: '11.5px ' + SANS, height: 30 }} />
+                <Btn small disabled={busy || !askQ.trim()} onClick={() => { act('/api/finance/invoices/' + inv.id + '/ask', { question: askQ }, 'Asked'); setAskQ(''); }}>Ask</Btn></div>
+            </FinSec>
+            <FinSec title="Details & audit trail">
+              <div style={{ font: '11px/1.7 ' + MONO, color: C.mute }}>issued {inv.date} · period {inv.period}{inv.po ? ' · ' + inv.po : ''}<br />from {inv.from_email || '—'} · remit {inv.remit_to || '—'}</div>
+              <div className="mt-2 flex flex-col gap-0.5">{inv.decisions.map((d, k) => <div key={k} style={{ font: '10.5px/1.5 ' + MONO, color: C.dim }}>{new Date(d.ts * 1000).toLocaleString()} · <span style={{ color: C.mute }}>{d.actor}</span> · {d.kind} · {d.decision}{d.amount ? ' ' + fmt$(d.amount) : ''}</div>)}</div>
+            </FinSec>
           </div>
-          <div className="flex gap-2 mt-2"><input value={askQ} onChange={e => setAskQ(e.target.value)} onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter' && askQ.trim()) { act('/api/finance/invoices/' + inv.id + '/ask', { question: askQ }, 'Asked'); setAskQ(''); } }} placeholder={'e.g. Why ' + (inv.analysis ? inv.analysis.decision.replace('_', ' ') : 'this') + ' instead of paying it?'} className="flex-1 rounded-full px-3 outline-none" style={{ background: C.p2, border: '1px solid ' + C.line2, color: C.text, font: '11.5px ' + SANS, height: 30 }} />
-            <Btn small disabled={busy || !askQ.trim()} onClick={() => { act('/api/finance/invoices/' + inv.id + '/ask', { question: askQ }, 'Asked'); setAskQ(''); }}>Ask why</Btn></div>
-        </div>
-        <Label>Audit trail</Label>
-        <div className="flex flex-col gap-0.5">{inv.decisions.map((d, k) => <div key={k} style={{ font: '10.5px/1.5 ' + MONO, color: C.mute }}>{new Date(d.ts * 1000).toLocaleString()} · <span style={{ color: C.text }}>{d.actor}</span> · {d.kind} · {d.decision}{d.amount ? ' ' + fmt$(d.amount) : ''}</div>)}</div>
-      </div> : <div style={{ color: C.mute, font: '12px ' + SANS }}>No invoices.</div>}</div>
+        </div>; })() : <div className="p-6" style={{ color: C.mute, font: '12px ' + SANS }}>No invoices.</div>}</div>
     </div>}
     {sub === 'explorer' && <div className="flex-1 overflow-auto p-4 flex flex-col gap-3">
       <div className="flex items-center gap-2"><Label>Group by</Label>{['service', 'vendor', 'incident', 'acct'].map(k => <button key={k} onClick={() => setGroupBy(k)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '3px 10px', color: groupBy === k ? '#04121a' : C.mute, background: groupBy === k ? C.cyan : 'transparent', border: '1px solid ' + C.line }}>{k}</button>)}<span className="ml-auto" style={{ font: '10px ' + MONO, color: C.dim }}>Posted expense lines from the general ledger · log scale</span></div>
       <Panel style={{ padding: 10 }}><EChart option={explorerOpt} height={260} /></Panel>
-      <div className="grid gap-3" style={{ gridTemplateColumns: 'minmax(320px,1.2fr) minmax(300px,1fr)' }}>
+      <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))' }}>
         <Panel style={{ padding: 12 }}><Label>{groupBy} · {month} vs all time</Label>{totals.map(([k, m, a]) => <div key={k} className="flex justify-between" style={{ font: '11.5px/1.9 ' + MONO, borderBottom: '1px solid ' + C.line }}><span style={{ color: C.text }}>{k}</span><span style={{ color: C.mute }}>{fmt$(m)} <span style={{ color: C.dim }}>· {fmt$(a)}</span></span></div>)}</Panel>
         <Panel style={{ padding: 12 }}><Label>October budgets</Label>{Object.entries(D.budgets).map(([a, b]) => { const pct = b.actual / b.budget; return <div key={a} className="mt-2"><div className="flex justify-between" style={{ font: '11px ' + MONO, color: C.text }}><span>{a} {b.name.replace('COGS - ', '')}</span><span style={{ color: pct > 1 ? C.red : pct > 0.8 ? C.amber : C.mute }}>{fmt$(b.actual)} / {fmt$(b.budget)}</span></div><div style={{ height: 5, background: C.p2, borderRadius: 3, marginTop: 3 }}><div style={{ width: Math.min(100, pct * 100) + '%', height: 5, borderRadius: 3, background: pct > 1 ? C.red : pct > 0.8 ? C.amber : C.cyan }} /></div></div>; })}</Panel>
       </div></div>}
     {sub === 'incidents' && <div className="flex-1 overflow-auto p-4 flex flex-col gap-3">
       {plan && inc.state !== 'CLOSED' && <Panel style={{ padding: 12 }}><Label color={C.amber}>Live · cost approval for {plan.plan_id} v{plan.version} ({inc.id})</Label>
-        <div className="grid grid-cols-4 gap-2 mt-2">{[['Incremental cost', fmt$(plan.finance.incremental_cost_usd)], ['Burst budget left', fmt$(b52.budget - b52.actual)], ['After this plan', fmt$(b52.budget - b52.actual - plan.finance.incremental_cost_usd)], ['SLA exposure avoided', fmt$(Math.max(0, plan.baseline.sla_exposure_usd - plan.finance.sla_exposure_usd))]].map(([k, v]) => <div key={k} className="p-2 rounded" style={{ background: C.p2 }}><Label>{k}</Label><div style={{ font: '500 13px ' + MONO, color: C.text, marginTop: 3 }}>{v}</div></div>)}</div>
+        <div className="grid gap-2 mt-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>{[['Incremental cost', fmt$(plan.finance.incremental_cost_usd)], ['Burst budget left', fmt$(b52.budget - b52.actual)], ['After this plan', fmt$(b52.budget - b52.actual - plan.finance.incremental_cost_usd)], ['SLA exposure avoided', fmt$(Math.max(0, plan.baseline.sla_exposure_usd - plan.finance.sla_exposure_usd))]].map(([k, v]) => <div key={k} className="p-2 rounded" style={{ background: C.p2 }}><Label>{k}</Label><div style={{ font: '500 13px ' + MONO, color: C.text, marginTop: 3 }}>{v}</div></div>)}</div>
         <div style={{ font: '11px/1.5 ' + SANS, color: C.mute, marginTop: 6 }}>Policy {plan.policy.decision.replace('_', ' ')} · {plan.policy.plan_rules.filter(r => r.decision !== 'AUTO_ALLOWED').map(r => r.rule).join(' · ') || 'no cost rule triggered'}. On execution the cost is accrued (Dr 5200 / Cr 2100); the vendor invoice is matched against it at closeout.</div></Panel>}
       <Panel style={{ padding: 12 }}><Label>Post-incident cost report</Label>
         <table className="w-full mt-2" style={{ font: '11px ' + MONO, color: C.text, borderCollapse: 'collapse' }}><thead><tr style={{ color: C.dim, textAlign: 'left' }}>{['Incident', 'Accrued at execution', 'Booked expense', 'Invoiced', 'Paid', 'Exceptions', 'Invoices'].map(h => <th key={h} style={{ padding: 6, borderBottom: '1px solid ' + C.line, fontWeight: 500 }}>{h}</th>)}</tr></thead>
           <tbody>{incRows.map(r => <tr key={r.id} style={{ borderBottom: '1px solid ' + C.line }}><td style={{ padding: 6, color: C.cyan }}>{r.id}</td><td style={{ padding: 6 }}>{fmt$(r.accrued)}</td><td style={{ padding: 6 }}>{fmt$(r.booked)}</td><td style={{ padding: 6 }}>{fmt$(r.invoiced)}</td><td style={{ padding: 6 }}>{fmt$(r.paid)}</td><td style={{ padding: 6, color: r.disputed ? C.red : C.mute }}>{r.disputed || '—'}</td><td style={{ padding: 6, color: C.mute }}>{r.invs.map(i => i.id + ' (' + i.status.replace(/_/g, ' ') + ')').join(', ')}</td></tr>)}</tbody></table></Panel>
     </div>}
-    {sub === 'ledger' && <div className="flex-1 overflow-auto p-4 grid gap-3" style={{ gridTemplateColumns: 'minmax(300px,0.8fr) minmax(420px,1.5fr)' }}>
+    {sub === 'ledger' && <div className="flex-1 overflow-auto p-4 grid gap-3 items-start" style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(300px,0.8fr) minmax(0,1.5fr)' }}>
       <div className="flex flex-col gap-3"><Panel style={{ padding: 12 }}><div className="flex justify-between"><Label>Trial balance</Label><span style={{ font: '600 10px ' + MONO, color: Math.abs(D.trial_balance.total_debit - D.trial_balance.total_credit) < 0.01 ? C.mint : C.red }}>{Math.abs(D.trial_balance.total_debit - D.trial_balance.total_credit) < 0.01 ? 'BALANCED' : 'OUT OF BALANCE'}</span></div>
         {D.trial_balance.rows.filter(r => r.debit || r.credit).map(r => <div key={r.acct} className="grid" style={{ gridTemplateColumns: '1fr 90px 90px', font: '11px/1.9 ' + MONO, borderBottom: '1px solid ' + C.line }}><span style={{ color: C.text }}>{r.acct} {r.name}</span><span style={{ textAlign: 'right' }}>{r.debit ? fmt$(r.debit) : ''}</span><span style={{ textAlign: 'right' }}>{r.credit ? fmt$(r.credit) : ''}</span></div>)}
         <div className="grid" style={{ gridTemplateColumns: '1fr 90px 90px', font: '600 11px/2 ' + MONO }}><span>Total</span><span style={{ textAlign: 'right' }}>{fmt$(D.trial_balance.total_debit)}</span><span style={{ textAlign: 'right' }}>{fmt$(D.trial_balance.total_credit)}</span></div></Panel>
@@ -1806,7 +1905,7 @@ function FinanceDesk({ g, toast, narrow }) {
           <div style={{ font: '11px ' + SANS, color: C.text, margin: '2px 0' }}>{j.memo}</div>
           {j.lines.map((l, k) => <div key={k} className="grid" style={{ gridTemplateColumns: '1fr 90px 90px', font: '10.5px ' + MONO, color: C.mute }}><span>{l.cr ? '   ' : ''}{l.acct} {(D.trial_balance.rows.find(r => r.acct === l.acct) || {}).name}{l.incident ? ' · ' + l.incident : ''}</span><span style={{ textAlign: 'right' }}>{l.dr ? fmt$(l.dr) : ''}</span><span style={{ textAlign: 'right' }}>{l.cr ? fmt$(l.cr) : ''}</span></div>)}</div>)}</Panel>
     </div>}
-    {sub === 'proof' && <div className="flex-1 overflow-auto p-4 grid gap-3" style={{ gridTemplateColumns: 'minmax(420px,1.4fr) minmax(300px,1fr)' }}>
+    {sub === 'proof' && <div className="flex-1 overflow-auto p-4 grid gap-3 items-start" style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(0,1.4fr) minmax(280px,1fr)' }}>
       <Panel style={{ padding: 12 }}><div className="flex justify-between items-baseline"><Label color={C.mint}>Planted errors vs answer key</Label><span style={{ font: '600 12px ' + MONO, color: C.mint }}>{D.score.correct}/{D.score.total} correct · {D.score.caught}/{D.score.planted_errors} errors caught · {D.score.false_flags} false flags</span></div>
         <table className="w-full mt-2" style={{ font: '11px ' + MONO, color: C.text, borderCollapse: 'collapse' }}><thead><tr style={{ color: C.dim, textAlign: 'left' }}>{['Invoice', 'Planted', 'Expected', 'System', ''].map(h => <th key={h} style={{ padding: 6, borderBottom: '1px solid ' + C.line, fontWeight: 500 }}>{h}</th>)}</tr></thead>
           <tbody>{D.score.cases.map(c => <tr key={c.invoice_id} style={{ borderBottom: '1px solid ' + C.line }}><td style={{ padding: 6, color: C.cyan }}>{c.invoice_id}</td><td style={{ padding: 6, color: C.mute, maxWidth: 300 }}>{c.planted}</td><td style={{ padding: 6 }}>{c.expected} {fmt$(c.expected_amount)}</td><td style={{ padding: 6 }}>{c.system} {fmt$(c.system_amount)}</td><td style={{ padding: 6, color: c.correct ? C.mint : C.red }}>{c.correct ? '✓' : '✗'}</td></tr>)}</tbody></table>

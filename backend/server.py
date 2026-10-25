@@ -31,6 +31,7 @@ def boot_sim():
 SIM = boot_sim()
 ENG = E.Engine(SIM, OWNER)
 STDBP = STDB.Publisher(ENG, SIM)
+if LOCAL: STDBP.enabled = False
 CLIENTS = set(); TICKETS = {}
 HIST = {S.rack_id(i // 8, i % 8): deque(maxlen=90) for i in range(64)}
 OPTIONS = {}           # incident -> list of evaluated options (summaries) for comparison

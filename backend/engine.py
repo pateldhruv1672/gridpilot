@@ -705,6 +705,30 @@ class Engine:
         d.setdefault("steps", []).append({"name": name, "ok": ok, "detail": detail, "ts": now(), "sim_t": round(self.sim.t, 1)})
         self.db.ex("update executions set data=? where id=?", (jd(d), ex_id)); self.notify()
 
+    def impact_baseline(self, actions, inc_rack):
+        """Rack and cooling state of everything a plan touches, captured just before it is applied, so the UI can show
+        measured before -> now deltas (not forecasts)."""
+        snap = self.sim.snapshot(field=False); byid = {r["rack_id"]: r for r in snap["racks"]}
+        roles = {}
+        def add(rid, role):
+            if rid in byid and rid not in roles: roles[rid] = role
+        add(inc_rack, "incident")
+        for a in actions:
+            if a.get("type") == "migrate_workload":
+                src = a.get("from_rack") or next((r["rack_id"] for r in snap["racks"] if a.get("workload") in r["workloads"]), None)
+                add(src, "source"); add(a.get("to_rack"), "target")
+            elif a.get("type") == "set_gpu_power_limit": add(a.get("rack"), "throttled")
+        for a in actions:
+            if a.get("type") == "set_cooling_fan":
+                k = int(str(a.get("unit", "C01"))[-1]) - 1
+                aisle = sorted([r for r in snap["racks"] if r["row"] // 2 == k], key=lambda r: -r["gpu_temp_c"])
+                for r in aisle[:3]: add(r["rack_id"], "cooled")
+        racks = {rid: {"role": role, "gpu_c": byid[rid]["gpu_temp_c"], "inlet_c": byid[rid]["inlet_temp_c"], "power_kw": byid[rid]["power_kw"],
+                       "status": byid[rid]["status"], "workloads": list(byid[rid]["workloads"])} for rid, role in list(roles.items())[:8]}
+        units = {c["unit_id"]: {"fan_pct": c["fan_pct"], "supply_c": c["supply_temp_c"]} for c in snap["cooling"]
+                 if any(a.get("type") == "set_cooling_fan" and a.get("unit") == c["unit_id"] for a in actions)}
+        return {"sim_t": round(self.sim.t, 1), "wall_ts": now(), "racks": racks, "units": units}
+
     async def execute(self, inc_id, ex_id, plan):
         inc = self.incident(inc_id); actions = plan["actions"]
         try:
@@ -731,13 +755,14 @@ class Engine:
             sha = CS.commit_candidate(wt, branch, "%s: apply %s v%d for %s" % (ex_id, plan["id"], plan["version"], inc_id))
             self._step(ex_id, "committed", True, "main -> %s" % sha[:10])
             applied = CS.read_tree()
+            impact_before = self.impact_baseline(actions, inc["rack"])
             self.sim.load_config(applied)
             self._step(ex_id, "applied_to_simulator", True, "simulator reloaded configuration %s" % sha[:10])
             self.record_usage(inc_id, ex_id, actions, cfg_now)
             if getattr(self, "desk", None):
                 try: self.desk.accrue_incident(inc_id, [x for x in (dict(json.loads(u["data"]), kind=u["kind"]) for u in self.db.all("select * from usage where incident_id=?", (inc_id,))) if x.get("execution_id") == ex_id])
                 except Exception: traceback.print_exc()
-            self._exec_update(ex_id, "monitoring", applied_sha=sha, applied_at_sim_t=round(self.sim.t, 1))
+            self._exec_update(ex_id, "monitoring", applied_sha=sha, applied_at_sim_t=round(self.sim.t, 1), impact_before=impact_before)
             inc = self.incident(inc_id)
             inc["monitor"] = {"execution_id": ex_id, "start_sim_t": self.sim.t, "below_since": None, "targets": [a["to_rack"] for a in actions if a["type"] == "migrate_workload"]}
             self.save_incident(inc)
