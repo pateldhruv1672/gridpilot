@@ -332,7 +332,7 @@ class Desk:
             if a["decision"] == "hold" and not note.startswith("verified"):
                 raise ValueError("held for verification: record the callback result (note starting with 'verified') before approving")
             if a["decision"] == "dispute" and "override" not in note: raise ValueError("matcher recommends dispute; add 'override: <reason>' to approve anyway")
-            jid = self._approve(r, a if a["decision"] != "dispute" else dict(a, amount=r["amount"]), who, note or "controller approved", approved_by=who)
+            jid = self._approve(r, a if a["decision"] not in ("dispute", "hold") else dict(a, amount=r["amount"]), who, note or "controller approved", approved_by=who)   # release/override pays the billed amount
             self.event(None, "ap_controller_approved", who, {"invoice_id": iid, "je": jid}); self.notify(); return {"ok": True, "je": jid}
         if action == "dispute":
             self.db.ex("update ap_invoices set status='disputed' where id=?", (iid,))

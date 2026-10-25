@@ -958,8 +958,9 @@ function useGridpilot() {
     open();
     return () => { dead = true; clearTimeout(timer); if (ws) ws.close(); };
   }, [url, wsUrl, api]);
+  const refresh = React.useCallback(async () => { try { const s = await api('/api/state'); if (s && s.desk) setState(s); } catch (e) { } }, [api]);
   const merged = state ? { ...state, incident: mergeIncident(state.incident, stdb.dataRef.current) } : state;
-  return { url, error, snapRef, twinRef, gpusRef, tickN, state: merged, conn, api, stdb };
+  return { url, error, snapRef, twinRef, gpusRef, tickN, state: merged, conn, api, stdb, refresh };
 }
 
 
@@ -1882,7 +1883,15 @@ function FinanceDesk({ g, toast, narrow }) {
   const st = g.state; const D = st && st.desk; const inc = st && st.incident;
   const [sub, setSub] = React.useState('inbox'); const [sel, setSel] = React.useState(null); const [note, setNote] = React.useState(''); const [busy, setBusy] = React.useState(false);
   const [groupBy, setGroupBy] = React.useState('service'); const [askQ, setAskQ] = React.useState(''); const [newInv, setNewInv] = React.useState(false);
+  const [res, setRes] = React.useState(null); const [verified, setVerified] = React.useState(false);
+  React.useEffect(() => { setVerified(false); setNote(''); }, [sel]);
   if (!D) return <div className="flex-1 p-6" style={{ background: C.bg, color: C.mute, font: '12px ' + SANS }}>Loading finance desk…</div>;
+  const decide = async (iid, action, body, okMsg) => {
+    setBusy(true); setSel(iid);
+    try { const r = await g.api('/api/finance/invoices/' + iid + '/' + action, 'POST', body || {}); setRes({ iid, ok: true, text: okMsg + (r.je ? ' · journal ' + r.je : '') }); toast(okMsg, 'ok'); setNote(''); setVerified(false); }
+    catch (e) { setRes({ iid, ok: false, text: e.message }); toast(e.message, 'err'); }
+    setBusy(false); g.refresh && g.refresh();
+  };
   const act = async (path, body, okMsg) => { setBusy(true); try { const r = await g.api(path, 'POST', body || {}); toast(r.message || okMsg, r.ok === false ? 'err' : 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(false); };
   const pending = D.invoices.filter(i => !['paid', 'disputed_resolved'].includes(i.status));
   const approved = D.invoices.filter(i => ['approved', 'partially_disputed'].includes(i.status));
@@ -1954,10 +1963,17 @@ function FinanceDesk({ g, toast, narrow }) {
             {rec && <div className="mt-2" style={{ font: '11.5px/1.5 ' + SANS, color: rec.decision === a.decision ? C.mute : C.amber }}>{rec.decision === a.decision ? '✓ CREAO AP Analyst agrees' : '⚠ CREAO AP Analyst recommends ' + rec.decision + (rec.amount ? ' ' + fmt$(rec.amount) : '') + ' instead. You decide.'}</div>}
             {a.segregation && <div style={{ font: '11px ' + SANS, color: C.amber, marginTop: 4 }}>Segregation of duties: {a.segregation}</div>}
             {open && <div className="flex gap-2 flex-wrap mt-3 items-center">
-              <input value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => e.stopPropagation()} placeholder={a.decision === 'hold' ? 'Verified by callback to the number on file…' : 'Note for the audit trail (optional)'} className="flex-1 rounded-full px-3 outline-none" style={{ minWidth: 200, background: C.p2, border: '1px solid ' + C.line2, color: C.text, font: '11.5px ' + SANS, height: 30 }} />
-              <Btn tone="mint" disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/approve', { note }, 'Approved and posted')}>Approve</Btn>
-              <Btn tone="danger" disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/dispute', { note }, 'Disputed')}>Dispute</Btn>
-              <Btn disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/hold', { note }, 'Held')}>Hold</Btn></div>}
+              <input value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => e.stopPropagation()} placeholder={a.decision === 'hold' ? 'Callback notes (who you spoke to, when)…' : a.decision === 'dispute' ? 'Reason (required to approve anyway)…' : 'Note for the audit trail (optional)'} className="flex-1 rounded-full px-3 outline-none" style={{ minWidth: 200, background: C.p2, border: '1px solid ' + C.line2, color: C.text, font: '11.5px ' + SANS, height: 30 }} />
+              {a.decision === 'hold'
+                ? <Btn tone="mint" disabled={busy || !verified} title={verified ? '' : 'Tick the callback confirmation first'} onClick={() => decide(inv.id, 'approve', { note: 'verified: ' + (note.trim() || 'callback to the number on file confirmed the invoice and bank details') }, 'Released and approved after callback')}>Release & approve</Btn>
+                : a.decision === 'dispute'
+                ? <Btn tone="mint" disabled={busy || !note.trim()} title={note.trim() ? '' : 'Type the reason for overriding the dispute'} onClick={() => decide(inv.id, 'approve', { note: 'override: ' + note.trim() }, 'Approved in full (override recorded)')}>Approve anyway</Btn>
+                : <Btn tone="mint" disabled={busy} onClick={() => decide(inv.id, 'approve', { note }, 'Approved and posted')}>Approve{a.amount != null ? ' ' + fmt$(a.amount) : ''}</Btn>}
+              <Btn tone="danger" disabled={busy} onClick={() => decide(inv.id, 'dispute', { note }, a.decision === 'dispute' && a.amount > 0 ? 'Paid ' + fmt$(a.amount) + ' at contract, remainder disputed' : 'Disputed')}>Dispute</Btn>
+              <Btn disabled={busy} onClick={() => decide(inv.id, 'hold', { note }, 'Held')}>Hold</Btn></div>}
+            {open && a.decision === 'hold' && <label className="flex items-center gap-2 mt-2 cursor-pointer" style={{ font: '11.5px ' + SANS, color: C.mute }}><input type="checkbox" checked={verified} onChange={e => setVerified(e.target.checked)} /> I called {inv.vendor_name} at the number on file and confirmed this invoice and its bank details. Required to release a held invoice.</label>}
+            {open && a.decision === 'dispute' && <div style={{ font: '11px ' + SANS, color: C.dim, marginTop: 6 }}>The matcher recommends a dispute. <b style={{ color: C.mute }}>Dispute</b> pays the contract amount and disputes the rest; <b style={{ color: C.mute }}>Approve anyway</b> pays in full and needs a reason for the audit trail.</div>}
+            {res && res.iid === inv.id && <div className="mt-2 px-3 py-2 rounded-lg" style={{ font: '12px ' + SANS, color: res.ok ? C.mint : C.red, background: res.ok ? 'rgba(79,224,165,.07)' : 'rgba(255,89,110,.07)', border: '1px solid ' + (res.ok ? 'rgba(79,224,165,.3)' : 'rgba(255,89,110,.3)') }}>{res.ok ? '✓ ' : '✕ '}{res.text}{res.ok ? ' · status now ' + inv.status.replace(/_/g, ' ') : ''}</div>}
           </div>}
           <div><Label>Invoice lines</Label><div className="mt-1.5">{inv.lines.map((l, k) => <div key={k} className="grid gap-3 py-1.5" style={{ gridTemplateColumns: 'minmax(0,1fr) auto auto', borderBottom: '1px solid ' + C.line, font: '11.5px ' + MONO }}><span className="truncate" style={{ color: C.text }}>{l.sku}</span><span style={{ color: C.mute }}>{l.qty.toLocaleString()} × {fmt$(l.rate)}</span><span style={{ color: C.text, minWidth: 80, textAlign: 'right' }}>{fmt$(l.usd)}</span></div>)}</div></div>
           {a && <div><Label>Three-way match · contract × meter × invoice</Label><div className="mt-1.5 flex flex-col">
