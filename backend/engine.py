@@ -4,7 +4,7 @@ execution against the git config store, recovery monitoring, rollback, finance, 
 import asyncio, copy, hashlib, json, os, secrets, sqlite3, time, traceback
 from collections import deque
 import numpy as np
-import sim as S, configstore as CS, policy as POL, finance as FIN, integrations as IX, specialists as SP
+import sim as S, configstore as CS, policy as POL, finance as FIN, integrations as IX, specialists as SP, forecast_pool as FPOOL
 
 CODE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(os.environ.get("GRIDPILOT_HOME") or CODE_ROOT, "state", "gridpilot.db")
@@ -558,8 +558,10 @@ class Engine:
         """Deterministic forecast + finance + policy preview. No state change."""
         acts = self.normalize_actions(actions)
         base = self.sim.clone()
-        fc, bl = await asyncio.gather(asyncio.to_thread(self._run_forecast, base, acts, 600.0, focus),
-                                      asyncio.to_thread(self._run_forecast, base, [], 600.0, focus))
+        cfg = self.apply_actions(base.config, [a for a in acts if a["type"] in ("migrate_workload", "set_gpu_power_limit", "set_cooling_fan")]) if acts else None
+        tg = [a["to_rack"] for a in acts if a.get("type") == "migrate_workload"]; rc = S.THRESH["gpu_recovered_c"]
+        fc, bl = await asyncio.gather(FPOOL.run(FPOOL.engine_forecast, base, cfg, 600.0, focus, tg, rc),
+                                      FPOOL.run(FPOOL.engine_forecast, base, None, 600.0, focus, [], rc))
         fc["baseline_energy_kwh"] = bl["energy_kwh"]
         fin = FIN.evaluate(acts, self.sim.config, fc, S.CUSTOMERS)
         bfc = dict(bl); bfc["baseline_energy_kwh"] = bl["energy_kwh"]

@@ -951,7 +951,7 @@ function useGridpilot() {
         if (dead) return;
         ws = new WebSocket(wsUrl + '/ws?ticket=' + encodeURIComponent(ticket));
         ws.onopen = () => { retry = 0; setConn('live'); };
-        ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'tick') { if (!stdbLiveRef.current || !snapRef.current || snapRef.current.source !== 'spacetimedb') snapRef.current = m.snap; if (m.twin) twinRef.current = m.twin; if (m.gpus) gpusRef.current = m.gpus; setTickN(n => n + 1); } else if (m.type === 'state') { if (m.state.twin && !twinRef.current) twinRef.current = m.state.twin; if (m.state.gpus && !gpusRef.current) gpusRef.current = m.state.gpus; setState(m.state); } };
+        ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'tick') { if (!stdbLiveRef.current || !snapRef.current || snapRef.current.source !== 'spacetimedb') snapRef.current = m.snap; if (m.twin) twinRef.current = m.twin; if (m.gpus) gpusRef.current = m.gpus; setTickN(n => n + 1); } else if (m.type === 'state') { if (m.state.twin && !twinRef.current) twinRef.current = m.state.twin; if (m.state.gpus && !gpusRef.current) gpusRef.current = m.state.gpus; setState(m.state); } else if (m.type === 'state_patch') { setState(s => s ? { ...s, ...m.parts } : s); } };
         ws.onclose = () => { if (dead) return; setConn('reconnecting'); timer = setTimeout(open, Math.min(8000, 800 * 2 ** retry++)); };
       } catch (e) { setConn('error: ' + e.message); timer = setTimeout(open, 4000); }
     };

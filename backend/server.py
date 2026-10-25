@@ -222,13 +222,21 @@ async def sim_loop():
             msg = {"type": "tick", "snap": snap, "twin": twin_payload() if TICKN["n"] % 4 == 0 else None, "gpus": FLEET.payload() if TICKN["n"] % 4 == 2 else None, "series_point": ENG.series[-1] if ENG.series else None,
                    "incident_brief": {"id": inc["id"], "state": inc["state"], "rack": inc["rack"]} if inc else None, "speed": ENG.speed, "paused": ENG.paused}
             payload = E.jd(msg)
-            full = E.jd({"type": "state", "state": full_state()}) if DIRTY["v"] else None
-            DIRTY["v"] = False
+            parts = None
+            if DIRTY["v"] and time.time() - PUSH["last"] >= 0.9:          # changed sections only, at most ~1/s
+                DIRTY["v"] = False; PUSH["last"] = time.time()
+                parts = {k: E.jd(v) for k, v in full_state().items() if k not in ("twin", "gpus")}   # those stream in ticks
             for ws in list(CLIENTS):
-                try:
-                    await ws.send_str(payload)
-                    if full: await ws.send_str(full)
-                except Exception: CLIENTS.discard(ws)
+                if ws.closed: CLIENTS.discard(ws); SENT.pop(ws, None); continue
+                if ws in BUSY: continue                                     # slow client: skip this tick, never block the loop
+                patch = None
+                if parts is not None:
+                    seen = SENT.setdefault(ws, {})
+                    ch = [k for k, raw in parts.items() if seen.get(k) != hash(raw)]
+                    if ch:
+                        patch = '{"type": "state_patch", "parts": {' + ", ".join('"%s": %s' % (k, parts[k]) for k in ch) + '}}'
+                        for k in ch: seen[k] = hash(parts[k])
+                ENG.spawn(send_client(ws, payload, patch))
             if time.time() - last_save > 15:
                 last_save = time.time(); pickle.dump(SIM, open(os.path.join(STATE, "sim.pkl.tmp"), "wb")); os.replace(os.path.join(STATE, "sim.pkl.tmp"), os.path.join(STATE, "sim.pkl"))
                 pickle.dump(TWIN, open(os.path.join(STATE, "twin.pkl.tmp"), "wb")); os.replace(os.path.join(STATE, "twin.pkl.tmp"), os.path.join(STATE, "twin.pkl"))
@@ -451,16 +459,30 @@ async def health(req): return jresp({"ok": True, "sim_t": round(SIM.t, 1)})
 async def ws_ticket(req):
     viewer(req); t = secrets.token_urlsafe(16); TICKETS[t] = time.time() + 60; return jresp({"ticket": t})
 
+PUSH = {"last": 0.0}; SENT = {}; BUSY = set()
+
+async def send_client(ws, payload, patch):
+    BUSY.add(ws)
+    try:
+        await asyncio.wait_for(ws.send_str(payload), 10)
+        if patch: await asyncio.wait_for(ws.send_str(patch), 20)
+    except Exception:
+        if patch: SENT.pop(ws, None)                                         # resend everything next time
+        if ws.closed: CLIENTS.discard(ws)
+    finally:
+        BUSY.discard(ws)
+
 @routes.get("/ws")
 async def ws_handler(req):
     t = req.query.get("ticket")
     if not t or TICKETS.pop(t, 0) < time.time(): return web.Response(status=403, text="ticket required")
     ws = web.WebSocketResponse(heartbeat=20); await ws.prepare(req)
+    st0 = full_state(); SENT[ws] = {k: hash(E.jd(v)) for k, v in st0.items()}
+    await ws.send_str(E.jd({"type": "state", "state": st0}))
     CLIENTS.add(ws)
-    await ws.send_str(E.jd({"type": "state", "state": full_state()}))
     async for m in ws:
         if m.type == WSMsgType.ERROR: break
-    CLIENTS.discard(ws); return ws
+    CLIENTS.discard(ws); SENT.pop(ws, None); return ws
 
 @routes.get("/api/state")
 async def api_state(req): viewer(req); return jresp(full_state())
@@ -1353,6 +1375,7 @@ async def voice_tool(req):
 
 async def on_start(app):
     loop = asyncio.get_event_loop()
+    E.FPOOL.warm()
     try: await asyncio.to_thread(ENG.creao_config)
     except Exception: traceback.print_exc()
     for c in (sim_loop(), ENG.creao_poller(), ENG.cli_poller(), V.poller(ENG), ingress_refresher(), STDBP.run()):

@@ -7,7 +7,7 @@ mitigations through the git config store, schedules the maintenance window in th
 """
 import json, time, secrets, traceback
 import numpy as np
-import sim as S, finance as FIN, policy as POL, configstore as CS
+import sim as S, finance as FIN, policy as POL, configstore as CS, forecast_pool as FPOOL
 
 OFF_EFF, OFF_FLOW = 0.30, 0.25          # CRAH out of service (failed or in maintenance)
 REL_TOOLS = ["rel_get_context", "rel_capacity", "rel_evaluate", "rel_propose", "rel_report"]
@@ -108,7 +108,9 @@ class Reliability:
         start_in = float(start_in if start_in is not None else max(30, rul * 0.6))
         off_at = max(0.0, min(start_in, rul if rul else start_in))
         base = self.eng.sim.clone()
-        cf, fc = await asyncio.gather(asyncio.to_thread(self.forecast, base, [], k, off_at), asyncio.to_thread(self.forecast, base, acts, k, off_at))
+        cfg = self.eng.apply_actions(base.config, acts) if acts else None
+        cf, fc = await asyncio.gather(FPOOL.run(FPOOL.reliability_forecast, base, None, k, off_at, 600.0, OFF_EFF, OFF_FLOW),
+                                      FPOOL.run(FPOOL.reliability_forecast, base, cfg, k, off_at, 600.0, OFF_EFF, OFF_FLOW))
         fc["baseline_energy_kwh"] = cf["energy_kwh"]; cfx = dict(cf); cfx["baseline_energy_kwh"] = cf["energy_kwh"]
         fin = FIN.evaluate(acts, self.eng.sim.config, fc, S.CUSTOMERS); fin0 = FIN.evaluate([], self.eng.sim.config, cfx, S.CUSTOMERS)
         pol = POL.evaluate_plan(acts, self.eng.sim.config, fin["incremental_cost_usd"], {c for c, v in S.CUSTOMERS.items() if v["protected"]})
