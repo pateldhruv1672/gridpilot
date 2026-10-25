@@ -193,9 +193,14 @@ class Engine:
             self.spawn(self.spawn_specialist(inc_id, "sla_guardian", "Protected-SLA workloads %s are breaching on %s. Assess customer impact and the lowest-risk action set." % (", ".join(hit), inc["rack"]),
                                              requested_by="backend", context={"breaching": hit}, auto=True))
         # specialists that run on every incident, in parallel with the Remediation Agent; their findings are advisory and audited
-        self.spawn(self.spawn_specialist(inc_id, "thermal_forensics", "Incident %s just opened on %s. Determine the root cause of the hotspot and which racks must not receive workloads." % (inc_id, inc["rack"]),
+        have = {r["task"] for r in self.db.all("select task from agent_runs where incident_id=? and task in ('specialist:thermal_forensics','specialist:capacity_planner')", (inc_id,))}
+        claimed = self.__dict__.setdefault("_auto_spec", set())
+        for kk in ("thermal_forensics", "capacity_planner"):
+            if (inc_id, kk) in claimed: have.add("specialist:" + kk)
+            claimed.add((inc_id, kk))
+        if "specialist:thermal_forensics" not in have: self.spawn(self.spawn_specialist(inc_id, "thermal_forensics", "Incident %s just opened on %s. Determine the root cause of the hotspot and which racks must not receive workloads." % (inc_id, inc["rack"]),
                                          requested_by="backend", context={"stage": "incident_open"}, auto=True))
-        self.spawn(self.spawn_specialist(inc_id, "capacity_planner", "Incident %s on %s: find feasible target racks for the workloads that may need to move, keeping protected-SLA workloads on the healthiest racks." % (inc_id, inc["rack"]),
+        if "specialist:capacity_planner" not in have: self.spawn(self.spawn_specialist(inc_id, "capacity_planner", "Incident %s on %s: find feasible target racks for the workloads that may need to move, keeping protected-SLA workloads on the healthiest racks." % (inc_id, inc["rack"]),
                                          requested_by="backend", context={"stage": "incident_open"}, auto=True))
         await self.start_creao(inc_id, "diagnose_and_plan", {})
 

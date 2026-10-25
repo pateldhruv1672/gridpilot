@@ -164,7 +164,7 @@ def full_state():
     return {"incident": incident_detail(inc), "incidents": incs, "events": evs, "finance": finance_summary(), "integrations": integrations_status(),
             "series": list(ENG.series), "config_log": CS.log(15), "thresholds": S.THRESH, "speed": ENG.speed, "paused": ENG.paused,
             "fail_armed": ENG.fail_armed, "sim_t": round(SIM.t, 1), "evidence": EVIDENCE, "specialists": specialist_runs(), "desk": DESK.snapshot(),
-            "work_orders": REL.list(), "pm_proof": PRED.proof(), "twin": twin_payload(), "agent_summary": agent_summary(), "loops": loops(), "ghost": GHOST.view(), "gpus": FLEET.payload(), "scenario": SCEN.board()}
+            "work_orders": REL.list(), "pm_proof": PRED.proof(), "twin": twin_payload(), "agent_summary": agent_summary(), "loops": loops(), "ghost": GHOST.view(), "gpus": FLEET.payload(), "scenario": SCEN.board(), "stdb_watcher": watcher_view()}
 
 def specialist_runs():
     out = []
@@ -316,6 +316,29 @@ async def api_stdb_status(req):
 @routes.post("/api/stdb/enabled")
 async def api_stdb_enabled(req):
     owner_only(req); b = await req.json(); STDBP.enabled = bool(b.get("enabled", True)); return jresp(STDBP.status())
+
+WATCHER = {"report": None, "at": 0, "logged": set()}
+
+@routes.post("/api/stdb/watcher")
+async def api_stdb_watcher(req):
+    """Reports from the Audit Watcher agent (loopback only). It reads SpacetimeDB anonymously; the backend records its findings."""
+    owner_only(req)
+    if req.remote not in ("127.0.0.1", "::1"): raise web.HTTPForbidden(text='{"error": "loopback only"}', content_type="application/json")
+    b = await req.json(); b["findings"] = (b.get("findings") or [])[-30:]; b["verified"] = (b.get("verified") or [])[-12:]
+    WATCHER["report"] = b; WATCHER["at"] = time.time()
+    for f in b["findings"]:
+        k = f.get("key") + (":cleared" if f.get("cleared") else "")
+        if k in WATCHER["logged"]: continue
+        WATCHER["logged"].add(k)
+        ENG.event(f.get("incident"), "watcher_finding" if not f.get("cleared") else "watcher_cleared", "agent:audit-watcher", {"severity": f.get("severity"), "text": str(f.get("text"))[:300], "identity": (b.get("identity") or "")[:18]})
+    if b.get("probe") and "probe" not in WATCHER["logged"]:
+        WATCHER["logged"].add("probe"); ENG.event(None, "watcher_write_probe", "agent:audit-watcher", {"result": str(b["probe"].get("result"))[:200], "identity": (b.get("identity") or "")[:18]})
+    return jresp({"ok": True})
+
+def watcher_view():
+    r = WATCHER["report"]
+    if not r: return None
+    return {**{k: r.get(k) for k in ("status", "identity", "seq", "checks", "verified", "findings", "probe", "subscribers", "started")}, "reported_at": WATCHER["at"], "fresh": time.time() - WATCHER["at"] < 15}
 
 @routes.get("/api/approvals")
 async def api_approvals(req):

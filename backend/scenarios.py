@@ -7,6 +7,9 @@ verification run exactly as in production. The board tracks each participant fro
 import time, json, asyncio
 
 INVOICES = {
+    "cooling_fraud": {"vendor": "CTS", "number": "CTS-9%d", "remit_to": "Wells Fargo ••4402", "from_email": "accounts@cooltech-services.co", "po": "PO-7731", "requested_by": "facilities",
+                      "note": "Final invoice for the C02 coil and fan module repair. Our bank details changed; please remit today to avoid a service hold.",
+                      "lines": [{"sku": "CRAH-REPAIR", "qty": 1, "rate": 4850.00}]},
     "bank_change": {"vendor": "NBT", "number": "NBT-%d", "remit_to": "Chase Bank ••7781", "from_email": "billing@northbeam-transit-billing.com",
                     "note": "We moved banks. Please pay this and future invoices to the new account today.", "lines": [{"sku": "INTERZONE-GB", "qty": 40, "rate": 0.25}]},
     "over_billed": {"vendor": "NBT", "number": "NBT-%d", "lines": [{"sku": "INTERZONE-GB", "qty": 900, "rate": 0.25}]},
@@ -22,6 +25,8 @@ PARTICIPANTS = {
 }
 
 SCENARIOS = [
+    {"id": "cooling_fraud", "title": "Fraudulent cooling invoice", "summary": "A $4,850 invoice arrives that looks like the C02 repair from CoolTech Services. The three-way matcher and the CREAO AP Analyst review it independently, hold it and cite why: the bank and sender do not match the vendor master, PO-7731 is already billed in full for a single completed repair, and the requester cannot approve its payment. The Explainer then answers what the controller must verify.",
+     "participants": ["matcher", "ap", "explainer"], "stages": [(0, "invoice", "cooling_fraud"), (3, "ap_review", None), (50, "explain", "cooling_fraud")]},
     {"id": "cooling_peak", "title": "Cooling failure at peak inference load", "summary": "CRAH C02 loses most of its capacity while R17 serves protected inference traffic. Watch the detector open an incident, the Remediation Agent diagnose and simulate fixes, the policy engine gate them, a human approve (by voice if Cartesia is on), git apply the change and the finance closeout reconcile the cost.",
      "participants": ["detector", "remediation", "specialists", "policy", "voice", "executor", "v2"], "stages": [(0, "inject", "thermal")]},
     {"id": "failed_change", "title": "A fix that fails after deploy", "summary": "Same cooling fault, but the first applied change breaks a validation check. The executor rolls back from git, a specialist investigates and the Remediation Agent replans around the failed target.",

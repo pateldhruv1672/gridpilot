@@ -150,6 +150,7 @@ class Desk:
             x = CONTRACTS[ck]; rate_ok = abs(l["rate"] - x["rate"]) < 1e-9
             chk("rate_vs_contract", rate_ok, "%s billed at $%s vs contract %s $%s per %s" % (l["sku"], l["rate"], ck, x["rate"], x["unit"]), x["source"], "medium" if not rate_ok else "info")
         c = next((k for k in line_ct if k), None); ct = CONTRACTS.get(c)
+        po_over = None
         # metered usage
         meter = None
         if r["vendor"] == "ACX" and d.get("incident"):
@@ -163,6 +164,16 @@ class Desk:
             chk("quantity_vs_meter", abs(diff) < 1e-6, "billed %s vs metered %s (%s)" % (billed_qty, meter["qty"], meter["ref"]), meter["id"], "medium" if abs(diff) > 1e-6 else "info")
         elif ct and ct["unit"] == "job" and not uncovered:
             expected = ct["rate"]; chk("po_match", d.get("po") == "PO-7731", "invoice PO %s, PO amount $%.2f" % (d.get("po"), ct["rate"]), ct["source"])
+        po_over = None
+        if d.get("po") and ct and ct["unit"] == "job" and not uncovered:
+            billed_before = [(o["id"], o["amount"]) for o in self.db.all("select id, amount, data, status from ap_invoices where vendor=? and id<>? and created<=? and status not in ('disputed','rejected','disputed_resolved','held')", (r["vendor"], iid, r["created"]))
+                             if json.loads(o["data"]).get("po") == d.get("po")]
+            used = round(sum(x[1] for x in billed_before), 2); left = round(ct["rate"] - used, 2)
+            work = self.db.one("select count(*) n from gl_entries where source=?", ("ACCRUAL-" + d["po"],))
+            po_ok = amount <= left + 0.005
+            chk("po_balance", po_ok, "%s covers one job for $%.2f; already billed $%.2f%s; remaining $%.2f; this invoice $%.2f. Work evidence: %s completed repair accrued (ACCRUAL-%s)" % (
+                d["po"], ct["rate"], used, (" on " + ", ".join(x[0] for x in billed_before)) if billed_before else "", max(0, left), amount, (work["n"] if work else 0) or "no", d["po"]), ct["source"], "high" if not po_ok else "info")
+            if not po_ok: po_over = (used, billed_before)
         # duplicates: same vendor, same incident/period and lines, another invoice already received/approved/paid
         dup = None
         for o in self.db.all("select * from ap_invoices where vendor=? and id<>? and status not in ('disputed','rejected','disputed_resolved')", (r["vendor"], iid)):
@@ -181,7 +192,15 @@ class Desk:
         if credits: chk("open_vendor_credit", True, "open credit %s $%.2f (issued %s) should be applied" % (", ".join(x["id"] for x in credits), credit, credits[0]["issued"]), credits[0]["id"], "medium")
         # decision
         if not remit_ok or not dom_ok:
-            return self._decide(r, checks, "hold", 0.0, "Payment details differ from the vendor master and the request came from %s. Hold, verify by calling %s at the number on file (%s), never the number in the email." % (d.get("from_email"), v["name"], v["phone_on_file"]))
+            why = []
+            if not remit_ok: why.append("Vendor master: remit-to %s does not match %s on file for %s." % (d.get("remit_to"), v["remit"], v["name"]))
+            if not dom_ok: why.append("Sender: %s is not the vendor's domain (%s)." % (d.get("from_email"), v["domain"]))
+            if po_over is not None: why.append("Contract and usage: %s covers one job for $%.2f and $%.2f is already billed%s, backed by a single completed repair, so this would pay the same work twice." % (d["po"], ct["rate"], po_over[0], (" on " + ", ".join(x[0] for x in po_over[1])) if po_over[1] else ""))
+            elif any(c["name"] == "rate_vs_contract" and not c["ok"] for c in checks): why.append("Contract: billed rate differs from %s." % ct["source"])
+            if d.get("requested_by"): why.append("Separation of duties: requested by %s, who cannot approve its payment; controller sign-off is required." % PEOPLE.get(d["requested_by"], d["requested_by"]))
+            return self._decide(r, checks, "hold", 0.0, "Hold, do not pay. " + " ".join(why) + " Verify by calling %s at the number on file (%s), never the number in the email." % (v["name"], v["phone_on_file"]))
+        if po_over is not None:
+            return self._decide(r, checks, "dispute", 0.0, "%s is already fully billed ($%.2f%s): dispute in full." % (d["po"], po_over[0], (" on " + ", ".join(x[0] for x in po_over[1])) if po_over[1] else ""))
         if dup: return self._decide(r, checks, "dispute", 0.0, "Duplicate of %s: dispute in full." % dup)
         if same_use: return self._decide(r, checks, "dispute", 0.0, "Usage already billed on %s: dispute." % same_use)
         if uncovered:

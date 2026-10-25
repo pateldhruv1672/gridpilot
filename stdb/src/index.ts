@@ -149,7 +149,14 @@ const admin = table({ name: 'admin' }, {       // private: database owner, captu
   identity: t.identity().primaryKey(),
 });
 
-const spacetimedb = schema({ rack, coolingUnit, facilitySummary, thermalField, incident, plan, auditEvent, writer, admin });
+// Who is subscribed right now: one row per connected identity (dashboards, agents). Maintained by the lifecycle reducers below.
+const connection = table({ name: 'connection', public: true }, {
+  identity: t.identity().primaryKey(),
+  connectedAt: t.timestamp(),
+  writer: t.bool(),
+});
+
+const spacetimedb = schema({ rack, coolingUnit, facilitySummary, thermalField, incident, plan, auditEvent, writer, admin, connection });
 export default spacetimedb;
 
 type Ctx = ReducerCtx<InferSchema<typeof spacetimedb>>;
@@ -213,4 +220,18 @@ export const clearOperational = spacetimedb.reducer(ctx => {
   for (const r of [...ctx.db.incident.iter()]) ctx.db.incident.incidentId.delete(r.incidentId);
   for (const r of [...ctx.db.plan.iter()]) ctx.db.plan.planKey.delete(r.planKey);
   for (const r of [...ctx.db.auditEvent.iter()]) ctx.db.auditEvent.eventId.delete(r.eventId);
+});
+
+export const onClientConnected = spacetimedb.clientConnected(ctx => {
+  const row = { identity: ctx.sender, connectedAt: ctx.timestamp, writer: !!ctx.db.writer.identity.find(ctx.sender) };
+  if (ctx.db.connection.identity.find(ctx.sender)) ctx.db.connection.identity.update(row); else ctx.db.connection.insert(row);
+});
+
+export const onClientDisconnected = spacetimedb.clientDisconnected(ctx => {
+  ctx.db.connection.identity.delete(ctx.sender);
+});
+
+// Harmless write-permission probe: succeeds only for authorized writers and changes nothing. Read-only agents call it to prove they cannot write.
+export const probeWrite = spacetimedb.reducer(ctx => {
+  requireWriter(ctx);
 });

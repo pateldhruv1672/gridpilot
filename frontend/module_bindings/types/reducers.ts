@@ -8,11 +8,13 @@ import { type Infer as __Infer } from "spacetimedb";
 // Import all reducer arg schemas
 import ClearOperationalReducer from "../clear_operational_reducer";
 import GrantWriterReducer from "../grant_writer_reducer";
+import ProbeWriteReducer from "../probe_write_reducer";
 import PublishTickReducer from "../publish_tick_reducer";
 import RevokeWriterReducer from "../revoke_writer_reducer";
 
 export type ClearOperationalParams = __Infer<typeof ClearOperationalReducer>;
 export type GrantWriterParams = __Infer<typeof GrantWriterReducer>;
+export type ProbeWriteParams = __Infer<typeof ProbeWriteReducer>;
 export type PublishTickParams = __Infer<typeof PublishTickReducer>;
 export type RevokeWriterParams = __Infer<typeof RevokeWriterReducer>;
 

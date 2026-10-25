@@ -27,6 +27,13 @@ export const AuditEvent = __t.object("AuditEvent", {
 });
 export type AuditEvent = __Infer<typeof AuditEvent>;
 
+export const Connection = __t.object("Connection", {
+  identity: __t.identity(),
+  connectedAt: __t.timestamp(),
+  writer: __t.bool(),
+});
+export type Connection = __Infer<typeof Connection>;
+
 export const CoolingUnit = __t.object("CoolingUnit", {
   unitId: __t.string(),
   idx: __t.u32(),

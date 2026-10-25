@@ -36,6 +36,7 @@ import {
 // Import all reducer arg schemas
 import ClearOperationalReducer from "./clear_operational_reducer";
 import GrantWriterReducer from "./grant_writer_reducer";
+import ProbeWriteReducer from "./probe_write_reducer";
 import PublishTickReducer from "./publish_tick_reducer";
 import RevokeWriterReducer from "./revoke_writer_reducer";
 
@@ -43,6 +44,7 @@ import RevokeWriterReducer from "./revoke_writer_reducer";
 
 // Import all table schema definitions
 import AuditEventRow from "./audit_event_table";
+import ConnectionRow from "./connection_table";
 import CoolingUnitRow from "./cooling_unit_table";
 import FacilitySummaryRow from "./facility_summary_table";
 import IncidentRow from "./incident_table";
@@ -68,6 +70,17 @@ const tablesSchema = __schema({
       { name: 'audit_event_event_id_key', constraint: 'unique', columns: ['eventId'] },
     ],
   }, AuditEventRow),
+  connection: __table({
+    name: 'connection',
+    indexes: [
+      { accessor: 'identity', name: 'connection_identity_idx_btree', algorithm: 'btree', columns: [
+        'identity',
+      ] },
+    ],
+    constraints: [
+      { name: 'connection_identity_key', constraint: 'unique', columns: ['identity'] },
+    ],
+  }, ConnectionRow),
   coolingUnit: __table({
     name: 'cooling_unit',
     indexes: [
@@ -143,6 +156,7 @@ const tablesSchema = __schema({
 const reducersSchema = __reducers(
   __reducerSchema("clear_operational", ClearOperationalReducer),
   __reducerSchema("grant_writer", GrantWriterReducer),
+  __reducerSchema("probe_write", ProbeWriteReducer),
   __reducerSchema("publish_tick", PublishTickReducer),
   __reducerSchema("revoke_writer", RevokeWriterReducer),
 );
