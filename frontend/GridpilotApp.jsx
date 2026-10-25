@@ -519,7 +519,15 @@ function sample(F, x, z) {
 }
 function statusColor(s) { return s === 'critical' ? C.red : s === 'elevated' ? C.amber : C.mint; }
 
-function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd, impactRef }) {
+// Bearing health of a cooling unit from the twin's predictor (risk levels: 0 nominal, 1 watch, 2 warning, 3 critical/failed)
+function unitHealth(tw, id) {
+  if (!tw || !tw.assets) return { level: 0, vib: 0 };
+  const a = tw.assets.find(x => x.id === id) || {}; const p = (tw.predictions || {})[id] || {}; const s = a.sensors || {};
+  const failed = a.state === 'failed', maint = a.state === 'maintenance';
+  const level = failed ? 3 : { watch: 1, warning: 2, critical: 3, failed: 3 }[p.risk] || 0;
+  return { level, risk: failed ? 'failed' : p.risk || 'nominal', vib: Number(s.vibration_mm_s || p.value || 0), rul: p.rul_s, failed, maint };
+}
+function DataCenterScene({ snapRef, gpusRef, twinRef, opts, selected, onSelect, camCmd, impactRef }) {
   const wrap = React.useRef(null), labelsRef = React.useRef(null);
   const optsRef = React.useRef(opts); optsRef.current = opts;
   const selRef = React.useRef(selected); selRef.current = selected;
@@ -588,7 +596,9 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd, i
       g.position.set(9.0, 1.15, 3.0 + 4.8 * k); scene.add(g);
       const grille = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 1.6), new THREE.MeshBasicMaterial({ color: 0x43d9f5, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }));
       grille.rotation.y = -Math.PI / 2; grille.position.set(8.54, 1.0, 3.0 + 4.8 * k); scene.add(grille);
-      crah.push({ g, grille });
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.85, 1.05, 48), new THREE.MeshBasicMaterial({ color: 0xffbb55, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending }));
+      ring.rotation.x = -Math.PI / 2; ring.position.set(9.0, 0.03, 3.0 + 4.8 * k); ring.visible = false; scene.add(ring);
+      crah.push({ g, grille, ring });
     }
     // overhead trays
     const trayMat = new THREE.LineBasicMaterial({ color: 0x2a3b52, transparent: true, opacity: 0.8 });
@@ -717,7 +727,18 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd, i
         const imp = impactRef && impactRef.current;
         halos.forEach((h, k) => { const r = imp && imp.racks[k]; if (!r) { h.visible = false; return; } const [x, z] = rackPos(r.idx); h.position.set(x, 0.03, z); h.visible = true; h.material.color.set(impactColor(r.d)); const s = reduced ? 1 : 1 + 0.1 * Math.sin(clock * 2.2 + k); h.scale.set(s * 0.8, s * 1.15, s); h.material.opacity = (r.d <= -1 || r.d >= 1 ? 0.75 : 0.35) * (reduced ? 1 : 0.7 + 0.3 * Math.sin(clock * 2.2 + k)); });
         if (sel != null) { const [x, z] = rackPos(sel); selBox.position.set(x, 1.0, z); selBox.visible = true; selBox.material.opacity = 0.6 + 0.4 * Math.sin(clock * 3); } else selBox.visible = false;
-        snap.cooling.forEach((u, k) => { const bad = 1 - u.effectiveness; crah[k].g.material.emissive.set(bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan); crah[k].g.material.emissiveIntensity = 0.12 + 0.25 * (bad > 0.15 ? (reduced ? 1 : 0.6 + 0.4 * Math.sin(clock * 4)) : 0.3); crah[k].grille.material.color.set(bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan); crah[k].grille.material.opacity = 0.12 + 0.35 * u.flow_factor * u.fan_pct / 100; });
+        const twn = twinRef && twinRef.current;
+        snap.cooling.forEach((u, k) => { const bad = 1 - u.effectiveness; const hb = unitHealth(twn, u.unit_id);
+          // colour = worst of airflow effectiveness and predicted bearing risk (wear is invisible to effectiveness until the fan fails)
+          const col3 = hb.level >= 3 || bad > 0.4 ? C.red : hb.level === 2 || bad > 0.15 ? C.amber : hb.maint ? '#b49cff' : hb.level === 1 ? '#d9c27a' : C.cyan;
+          const alarm = hb.level >= 1 || bad > 0.15 || hb.maint;
+          const c = crah[k]; c.g.material.emissive.set(col3); c.g.material.emissiveIntensity = 0.12 + (alarm ? 0.35 : 0.075) * (alarm ? (reduced ? 1 : 0.6 + 0.4 * Math.sin(clock * (hb.level >= 3 ? 8 : 4))) : 1);
+          c.grille.material.color.set(col3); c.grille.material.opacity = 0.12 + 0.35 * u.flow_factor * u.fan_pct / 100;
+          // the bearing shakes the cabinet: amplitude follows measured vibration
+          const amp = hb.failed || hb.maint || reduced ? 0 : Math.max(0, Math.min(0.06, (hb.vib - 2.2) * 0.011));
+          c.g.position.x = 9.0 + amp * Math.sin(clock * 47 + k); c.g.position.z = 3.0 + 4.8 * k + amp * 0.6 * Math.sin(clock * 61 + k * 2);
+          c.ring.visible = hb.level >= 1 || hb.maint; if (c.ring.visible) { c.ring.material.color.set(col3); const s = reduced ? 1.1 : 1 + 0.25 * ((clock * (hb.level >= 3 ? 1.6 : 0.9) + k * 0.3) % 1); c.ring.scale.set(s, s, s); c.ring.material.opacity = (hb.level >= 2 ? 0.8 : 0.45) * (reduced ? 1 : 1.15 - (s - 1) * 3.4); }
+        });
         // plumes on hot racks
         const hotR = snap.racks.map((r, i) => [r.gpu_temp_c, i]).filter(([t]) => t > 82).sort((a, b) => b[0] - a[0]).slice(0, 6);
         plumes.forEach((m, k) => { const h = hotR[k]; if (!h || mode === 'power' || mode === 'workload') { m.visible = false; return; } const sev = Math.min(1, (h[0] - 82) / 12); const [x, z] = rackPos(h[1]); m.visible = true; const wob = reduced ? 1 : 1 + 0.08 * Math.sin(clock * 3 + k); m.scale.set(0.8 + sev * 0.6, 1.2 + sev * 2.4 * wob, 0.8 + sev * 0.6); m.position.set(x, 2.0 + (1.2 + sev * 2.4) / 2, z); m.material.opacity = 0.08 + 0.22 * sev; });
@@ -776,7 +797,7 @@ function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd, i
           if (impR) { const ic = impactColor(impR.d); d.style.color = ic; d.style.padding = '2px 6px'; d.style.background = 'rgba(7,11,19,.85)'; d.style.border = '1px solid ' + ic + '88'; d.textContent = rk.rack_id + ' ' + (impR.d < 0 ? '▼' : impR.d > 0 ? '▲' : '') + Math.abs(impR.d).toFixed(1) + '° → ' + rk.gpu_temp_c.toFixed(1) + '°C' + (impR.moved.length ? (impR.movedIn ? ' +' : ' −') + impR.moved.length + 'wl' : ''); d.title = impR.moved.join(', '); }
         }
         rowLabels.forEach((d, r) => { const [sx, sy, vis] = project(X0 - 0.55, 0.05, rowZ0(r) + 0.6); d.style.display = vis ? 'block' : 'none'; d.style.transform = 'translate(' + sx + 'px,' + sy + 'px) translate(-50%,-50%)'; });
-        unitLabels.forEach((d, k) => { const u = snap.cooling[k]; const [sx, sy, vis] = project(9.0, 2.5, 3.0 + 4.8 * k); d.style.display = vis ? 'block' : 'none'; d.style.transform = 'translate(' + sx + 'px,' + sy + 'px) translate(-50%,-100%)'; const bad = 1 - u.effectiveness; d.style.color = bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan; d.textContent = u.unit_id + ' ' + Math.round(u.effectiveness * 100) + '% · ' + u.supply_temp_c.toFixed(1) + '°C'; });
+        unitLabels.forEach((d, k) => { const u = snap.cooling[k]; const [sx, sy, vis] = project(9.0, 2.5, 3.0 + 4.8 * k); d.style.display = vis ? 'block' : 'none'; d.style.transform = 'translate(' + sx + 'px,' + sy + 'px) translate(-50%,-100%)'; const bad = 1 - u.effectiveness; const hb = unitHealth(twinRef && twinRef.current, u.unit_id); const col3 = hb.level >= 3 || bad > 0.4 ? C.red : hb.level === 2 || bad > 0.15 ? C.amber : hb.maint ? '#b49cff' : hb.level === 1 ? '#d9c27a' : C.cyan; d.style.color = col3; d.style.borderColor = hb.level >= 1 || hb.maint ? col3 + '99' : 'rgba(110,150,190,.25)'; d.textContent = u.unit_id + ' ' + Math.round(u.effectiveness * 100) + '% · ' + u.supply_temp_c.toFixed(1) + '°C' + (hb.failed ? ' · BEARING FAILED' : hb.maint ? ' · bearing replacement' : hb.level >= 1 ? ' · bearing ' + hb.vib.toFixed(1) + ' mm/s · ' + hb.risk + (hb.rul != null ? ' · RUL ' + (hb.rul >= 120 ? Math.round(hb.rul / 60) + 'm' : Math.round(hb.rul) + 's') : '') : ''); });
       }
     };
     raf = requestAnimationFrame(loop);
@@ -1803,7 +1824,7 @@ function ControlRoom({ g, setModal, toast, narrow }) {
   return <div className={'flex flex-col min-h-0 flex-1' + (narrow ? ' overflow-auto' : '')}>
     <div className={narrow ? 'flex flex-col' : 'flex flex-1 min-h-0'}>
       <div className="relative min-w-0" style={narrow ? { height: focus ? 'calc(var(--mana-app-height, 82vh) - 60px)' : 600, flexShrink: 0 } : { flex: '1 1 auto' }}>
-        <DataCenterScene snapRef={g.snapRef} gpusRef={g.gpusRef} opts={opts} selected={sel} onSelect={onSelect} camCmd={cmd} impactRef={impactRef} />
+        <DataCenterScene snapRef={g.snapRef} gpusRef={g.gpusRef} twinRef={g.twinRef} opts={opts} selected={sel} onSelect={onSelect} camCmd={cmd} impactRef={impactRef} />
         {imp && !selR && <div className="absolute left-3" style={{ bottom: 78 }}><ImpactHud imp={imp} /></div>}
         <div className="absolute left-3 top-3 flex flex-col gap-2 pointer-events-auto" style={{ maxWidth: narrow ? 'calc(100% - 24px)' : undefined }}>
           <div className="flex rounded-full p-0.5" style={{ background: 'rgba(16,24,38,.85)', border: '1px solid ' + C.line2 }}>
