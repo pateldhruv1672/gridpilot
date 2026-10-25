@@ -4,6 +4,10 @@
 
 **Live app (Mana):** https://www.mana.space/home/NhYNhCrTGxgLBbOLkQ6QkRCEdhD3/apps/gridpilot  (sign in to Mana to watch live; approvals and payments stay with the operator)
 
+![GRIDPILOT opens an incident on its own when R17 overheats](docs/media/gif-thermal-incident.gif)
+
+**Devpost write-up with screenshots and GIFs:** [DEVPOST.md](DEVPOST.md) · **Core CREAO agent:** `GRIDPILOT Remediation Agent`, ID `b01e1b42-3b5a-44a4-ad3a-4b5736622db8` · **Seats:** on-call infrastructure first responder, and the AP analyst plus cost controller for the vendors that night touched.
+
 **One line on the seats it fills:** the night-shift data-center operator, the accounts-payable analyst who checks vendor invoices before payment, and the cost controller who keeps incident spend inside budget, all signing off with a human controller.
 
 ## The moment
@@ -11,7 +15,7 @@
 1. Cooling unit C02 degrades. Rack R17 crosses 88 °C for 3 ticks and an incident opens on its own.
 2. The **CREAO Remediation Agent** pulls telemetry, capacity and workloads through GRIDPILOT's tools, tests options against the simulator and proposes a plan. A fan-only fix is policy-auto-allowed, so it executes itself.
 3. It doesn't work. After 420 s the backend **rolls the config back**, verifies the restored tree byte for byte, and, because this is a special case, **creates a new CREAO agent on the fly** (Thermal Forensics Specialist) to work out why.
-4. The specialist's findings feed a revised plan. Migrating customer workloads costs money and touches a protected SLA, so policy requires a human: the **Cartesia voice agent calls the operator**, answers questions, evaluates alternatives on the call, and collects approval with a one-time code.
+4. The specialist's findings feed a revised plan. Migrating customer workloads costs money and touches a protected SLA, so policy requires a human: the **Cartesia voice agent calls the on-call engineer**, answers questions, evaluates the engineer's own alternative ("move it to R38") exactly as asked, explains the tradeoffs, and takes approval as a clear spoken yes to a read-back plan version.
 5. The approved config is committed through an isolated git worktree with validation (schema, capacity, placement, power bounds, SLA, cooling feasibility), the twin recovers, and the **cost is accrued in a double-entry ledger**.
 6. The vendor invoice arrives. The finance desk matches it three ways (contract × meter × invoice), applies a credit the vendor still owes from a March dispute, and holds a look-alike "we changed banks" email until someone calls the number on file.
 
@@ -32,6 +36,8 @@
 - **Live incident run (24 Oct 2026):** CREAO remediation run `72f88b96` (8 plan evaluations, auto-allowed fan fix executed) → no recovery → verified rollback → specialist agent created in about 20 s and run `00ba099a` → replan run `4d8082cd` → plan v2 awaiting human approval. 58 audited tool calls.
 - **Incident engine offline:** `python tests/test_incident_flow.py` runs detection → plan → refusal without approval → approval → execution → recovery → invoice reconciliation (variance explained by the transfer record). Add `fail` to arm a post-apply fan fault and test rollback.
 
+- **Live deployment counters (25 Oct 2026):** 8 incidents closed end to end (mean detect → CREAO plan 5 m 41 s), 8 Cartesia calls with 5 voice approvals, CREAO AP Analyst agreed with the deterministic matcher on 82/88 decisions, 380 RUL predictions scored with 96.6% inside the 90% band and the C04 bearing failure called 791 s ahead.
+
 ## Hyphenate track: the finance desk
 
 - **Company:** Atlas Compute, a GPU cloud whose finance team pays for burst GPU capacity, electricity, network transfer and facilities repairs.
@@ -43,14 +49,34 @@
 
 ## Cartesia track: voice where it matters
 
-The on-call engineer gets a phone call, not a dashboard ping. The Managed Agent (Sonic voice, Cartesia-hosted LLM) has six webhook tools into GRIDPILOT: `get_incident_context`, `evaluate_alternative` (runs the simulator forecast live on the call), `get_cost_comparison`, `approve_plan`, `reject_plan`, `escalate_incident`. Voice expresses intent; the backend verifies authority (one-time 6-digit code shown only to the operator, hashed, locked after 3 failures, bound to one plan version, expires in 15 min). Calls go only to a registered operator who consented.
+The on-call engineer gets a phone call, not a dashboard ping, and can run the whole decision by voice.
+
+**Cartesia features used**
+- **Managed Agents** (`/v1/agents`): the "GRIDPILOT Voice Operator", configured and re-patched from code (`backend/voice.py`, `ensure_setup`).
+- **Webhook tools** (`/v1/agents/tools`), 7 tools into GRIDPILOT: `get_incident_context`, `evaluate_alternative` (runs the simulator live on the call; takes `target_rack` and `workload`), `adopt_alternative` (turns the engineer's evaluated option into a new plan version), `get_cost_comparison`, `approve_plan`, `reject_plan`, `escalate_incident`.
+- **Dynamic variables** (`incident_id`, `call_token`, `operator_name`), a **provisioned phone number**, **outbound calls** (`/agents/calls`), **call status and transcript polling**, and the `end_call` system tool.
+
+**Flow:** policy requires a human → GRIDPILOT dials the registered, consenting on-call number → the agent briefs the incident → the engineer asks questions or proposes an alternative, which is evaluated exactly as asked (or refused with a plain reason: no free GPUs, already hot, degraded aisle, forbidden by policy) → the agent reads the exact plan version back and asks "Do you approve plan PLN-x version N?" → only a clear yes approves; the engineer's words are stored with the approval, and the backend re-checks version, window and live state before committing.
+
+**Setup:** set `CARTESIA_API_KEY` and `PUBLIC_BASE_URL`, start the server, open Connections → **Test connections** (creates the agent, tools and number), then register a phone in the panel beside the 3D view.
+
+**Limitations:** the provisioned number dials US numbers only; tools need a public callback URL; transcripts arrive after the call; the agent says "Grid Pilot" by instruction (the all-caps name was spelled out by TTS before that fix).
 
 ## CREAO: autonomous agents, created when needed
+
+- **Core agent ID:** `b01e1b42-3b5a-44a4-ad3a-4b5736622db8` (GRIDPILOT Remediation Agent). **Example run:** `50315dd0-e715-4511-bab5-7c5fa1be637a` (INC-049 diagnose and plan, conversation `47a80d8e-4cba-401c-834d-23ff3bca181a`). **Run share link:** TODO, paste from agent.creao.ai.
+- **Totals so far:** 23 agents created through the API, 89 runs (86 completed), 1,212 audited agent tool calls.
 
 - **Remediation Agent** (diagnose, plan, replan, execute approved plans, post-incident summary).
 - **Specialists created on the fly** through the CREAO API when a special case appears: Thermal Forensics (post-apply failure), Capacity Placement (validation failure), FinOps Invoice Auditor (unreconciled invoice), SLA Guardian (protected customer in breach). The Remediation Agent can request a brand-new specialist by describing its mission.
 - **AP Analyst** for the finance desk.
 - Every run gets a scoped tool token: specialists can read and evaluate but never propose or execute; nothing an agent says is trusted until the deterministic backend re-checks it.
+
+## Built in Mana
+
+- **Live app:** https://www.mana.space/home/NhYNhCrTGxgLBbOLkQ6QkRCEdhD3/apps/gridpilot (any signed-in Mana user can open and operate it).
+- **Build chat:** https://www.mana.space/home/NhYNhCrTGxgLBbOLkQ6QkRCEdhD3/apps/gridpilot?chatId=00179287000977150b6f964a5b74736aa39 (TODO: set to public before submitting). Mana specified, wrote, deployed and debugged GRIDPILOT here: backend as a supervised sandbox daemon behind Mana ingress, keys injected server-side by Mana's proxy, UI iterated live as a Mana component, every change tested against a throwaway copy in Mana's browser, and a scheduled task syncing the code to this repo.
+- **Mana inside the product:** the Ghost Architect is a Mana agent (`mana.ask`) that reads the system digest hourly and proposes new agents, schedulers and detectors for operator approval; "Explain with Mana" narrates any incident trace.
 
 ## Architecture
 
@@ -104,7 +130,7 @@ Local mode binds to 127.0.0.1 and treats you as the operator. Inside Mana the ba
 
 ## Responsible use
 
-Human approval is required for anything that costs money, touches a protected customer, or moves cash. Voice approval works with no screen: GRIDPILOT itself phones the registered on-call engineer, reads the exact plan version back, and a clear spoken yes approves that version (ambiguous answers never do). The outbound call holds a per-call token, the backend re-checks version, window and live state, and the engineer's words are stored with the approval. Visitors get a read-only live view. Calls go only to a consenting, registered operator.
+Human approval is required for anything that costs money, touches a protected customer, or moves cash. Voice approval works with no screen: GRIDPILOT itself phones the registered on-call engineer, reads the exact plan version back, and a clear spoken yes approves that version (ambiguous answers never do). The outbound call holds a per-call token, the backend re-checks version, window and live state, and the engineer's words are stored with the approval. Any signed-in Mana user may operate the demo, but only after registering a phone number with explicit consent (or keeping the default on-call); every action is audited under their identity, numbers are stored only on the backend and shown masked, and each number gets at most 4 calls per hour. Infrastructure settings (voice setup, integrations, SpacetimeDB) stay owner-only.
 
 ## SpacetimeDB live state (maincloud/gridpilot)
 
