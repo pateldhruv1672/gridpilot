@@ -1300,8 +1300,9 @@ function TwinTab({ g, toast, narrow }) {
     series: [
       { name: 'observed', type: 'line', data: H_.map(p => [p[0], p[1]]), showSymbol: false, lineStyle: { width: 1.4, color: C.cyan }, itemStyle: { color: C.cyan },
         markLine: { silent: true, symbol: 'none', label: { color: C.red, fontSize: 9, fontFamily: MONO, formatter: 'functional failure' }, lineStyle: { color: 'rgba(255,89,110,.7)', type: 'dashed' }, data: [{ yAxis: 1 }] } },
-      { name: 'band lo', type: 'line', stack: 'band', data: proj.map(p => [p[0], p[2]]), showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 }, tooltip: { show: false } },
-      { name: '90% band', type: 'line', stack: 'band', data: proj.map(p => [p[0], Math.max(0, p[3] - p[2])]), showSymbol: false, lineStyle: { opacity: 0 }, areaStyle: { color: 'rgba(255,187,85,.16)' } },
+      // 90% band drawn as one polygon: stacking on a value x-axis stacks along time and threw the band out to t≈2x
+      { name: '90% band', type: 'custom', silent: true, z: 1, itemStyle: { color: 'rgba(255,187,85,.5)' }, data: proj.map(p => [p[0], p[2], p[3]]), encode: { x: 0, y: [1, 2] },
+        renderItem: (params, api) => { if (params.dataIndex !== 0 || proj.length < 2) return null; const pts = proj.map(p => api.coord([p[0], p[3]])).concat(proj.slice().reverse().map(p => api.coord([p[0], p[2]]))); return { type: 'polygon', shape: { points: pts }, style: { fill: 'rgba(255,187,85,.18)' } }; } },
       { name: 'forecast', type: 'line', data: proj.map(p => [p[0], p[1]]), showSymbol: false, lineStyle: { width: 1.6, color: C.amber, type: 'dashed' }, itemStyle: { color: C.amber } },
     ] };
   const plan = wo && wo.plans && wo.plans.slice(-1)[0];
