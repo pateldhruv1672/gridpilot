@@ -1186,6 +1186,12 @@ async def creao_tool(req):
     if isinstance(args, dict):
         thought = args.pop("thought", None) or args.pop("reasoning_note", None)
         thought = str(thought)[:600] if thought else None
+    if tok.get("task") in ("evaluate_alternative", "diagnose_and_plan", "replan_after_failure") and tool not in ("manifest",):
+        inc_ = ENG.incident(tok["incident_id"])
+        if inc_ and inc_["state"] not in ("DETECTED", "TRIAGING", "PLAN_PROPOSED", "POLICY_CHECKED", "AWAITING_APPROVAL", "REPLAN", "DENIED"):
+            ENG.db.ex("update agent_runs set status='superseded' where id=? and status not in ('completed','failed')", (tok["run_ref"],))
+            ENG.event(tok["incident_id"], "agent_tool_refused", actor, {"tool": tool, "reason": "incident already %s; this analysis run is superseded" % inc_["state"]})
+            return jresp({"error": "STOP: incident %s is already %s (a human decided). This analysis is no longer needed; end the run now with a one-line final answer." % (inc_["id"], inc_["state"])}, 409)
     try:
         if tok.get("task") == "reliability": res = await REL.tool(tool, args, tok.get("work_order"), actor)
         elif str(tok.get("task", "")).startswith("v2_"): res = await GHOST.tool(tool, args, actor, tok.get("orch_id"))
@@ -1285,19 +1291,12 @@ async def voice_tool(req):
                 ev = await ENG.evaluate(acts, ENG.incident(iid)["rack"], "operator: " + strat); remember_option(iid, ev, "operator suggestion: " + strat)
                 det = {"actions": ev["actions"], "recover_s": ev["forecast"]["recover_s"], "final_gpu_c": ev["forecast"]["final_gpu_c"], "incremental_cost_usd": ev["finance"]["incremental_cost_usd"],
                        "sla_exposure_usd": ev["finance"]["sla_exposure_usd"], "policy": ev["policy"]["decision"], "recovery_threshold_c": S.THRESH["gpu_recovered_c"]}
-            before = ENG.current_plan(iid); bv = before["version"] if before else 0
-            run = await ENG.start_creao(iid, "evaluate_alternative", {"operator_suggestion": sug, "strategy_hint": strat, "deterministic_evaluation": det})
-            revised = None
-            if run:
-                for _ in range(45):
-                    await asyncio.sleep(2)
-                    p = ENG.current_plan(iid)
-                    if p and p["version"] > bv and str(p["author"]).startswith("creao"):
-                        revised = {"plan_id": p["id"], "plan_version": p["version"], "actions": p["actions"], "recover_s": p["evaluation"]["forecast"]["recover_s"],
-                                   "incremental_cost_usd": p["evaluation"]["finance"]["incremental_cost_usd"], "policy": p["evaluation"]["policy"]["decision"],
-                                   "reasoning": (p.get("meta") or {}).get("reasoning_summary")}; break
-            res = {"deterministic_forecast_of_suggestion": det, "creao_revised_plan": revised,
-                   "creao_status": "revised plan ready" if revised else ("CREAO re-analysis still running; call get_incident_context shortly" if run else "CREAO unavailable")}
+            busy = ENG.db.one("select id from agent_runs where incident_id=? and task='evaluate_alternative' and status not in ('completed','failed','disconnected','superseded') and created > ?", (iid, time.time() - 600))
+            run = None if busy else await ENG.start_creao(iid, "evaluate_alternative", {"operator_suggestion": sug, "strategy_hint": strat, "deterministic_evaluation": det})
+            cur = ENG.current_plan(iid)
+            res = {"deterministic_forecast_of_suggestion": det, "current_plan": cur and {"plan_id": cur["id"], "plan_version": cur["version"], "actions": [STY.act_txt(a) for a in cur["actions"]]},
+                   "creao_status": ("CREAO is already re-analysing a suggestion (run %s); a revised plan, if any, will appear in get_incident_context" % busy["id"]) if busy else ("CREAO re-analysis started; a revised plan may appear in get_incident_context in about a minute" if run else "CREAO unavailable"),
+                   "say_to_operator": "Give the forecast numbers now. They can approve the current plan, wait for a revised plan version, or keep asking." if det else "This suggestion could not be mapped to concrete actions; ask them which workload and which rack."}
         elif tool == "get_cost_comparison":
             res = await tool_dispatch("get_cost_comparison", {}, iid, actor, "voice")
         elif tool == "approve_plan":

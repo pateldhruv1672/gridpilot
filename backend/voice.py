@@ -24,7 +24,7 @@ GRIDPILOT itself placed this call to {{operator_name}}, the registered on-call e
 Rules:
 - Open calmly: who you are, that it is about a live incident, and that you need a decision. Then call get_incident_context before stating any fact, and again whenever they ask for an update. Never invent numbers, racks, costs or plan versions.
 - Brief them in plain words, short sentences: what is happening, the probable cause, what the agent recommends (plan id and version, each action in everyday language), expected recovery time, the added cost, and the customer/SLA risk if nothing is done. Offer to repeat or slow down.
-- If they suggest a different approach, say you will evaluate it, call evaluate_alternative, and explain the result honestly, including when their option is worse.
+- If they suggest a different approach, call evaluate_alternative ONCE and read them the forecast it returns right away (recovery time, cost, SLA risk), including when their option is worse. It does not change the plan; a revised plan version only exists if get_incident_context later shows one. Let them approve the current version, wait for a revision, or ask more.
 - To approve: read the exact plan back ("plan PLN-x version N: move ..., set ..."), then ask a direct question: "Do you approve plan PLN-x version N?" Only after a clear, unambiguous yes, call approve_plan with plan_id, plan_version and operator_said set to their exact words. Never approve on silence, "maybe", "hold on", questions, or a yes to a different question. If unsure, ask again.
 - Tell them exactly what the backend returns: approved and executing, or why not (for example the plan changed: then brief the new version and ask again).
 - If they reject, call reject_plan with their reason. If they want someone else to decide, call escalate_incident.
@@ -60,7 +60,7 @@ def ensure_setup(engine):
                   "request_body_schema": {"type": "object", "properties": props, "required": req},
                   "request_headers": {"X-GridPilot-Call-Token": {"type": "dynamic_variable", "name": "call_token"}}}
         body = {"type": "webhook", "name": name, "description": desc, "pre_tool_speech": "auto", "execution_mode": "immediate",
-                "response_timeout_secs": 110 if name == "evaluate_alternative" else 20, "api_schema": schema}
+                "response_timeout_secs": 30 if name == "evaluate_alternative" else 20, "api_schema": schema}
         if name in tool_ids:
             cart("PATCH", "/v1/agents/tools/" + tool_ids[name], {k: v for k, v in body.items() if k != "type"})
         else:
@@ -124,13 +124,19 @@ async def poller(engine):
     while True:
         await asyncio.sleep(3)
         try:
-            for c in engine.db.all("select * from calls where status in ('queued','ringing','in_progress','connected','active','initiating')"):
+            for c in engine.db.all("select * from calls where status not in ('failed','completed','ended','canceled','cancelled','no_answer','busy','error') and created > ?", (time.time() - 3 * 3600,)):
                 d = json.loads(c["data"]); acid = d.get("agent_call_id")
                 if not acid: continue
                 try: info = await asyncio.to_thread(cart, "GET", "/agents/calls/" + acid)
                 except Exception as e:
                     d["poll_error"] = str(e)[:200]; engine.db.ex("update calls set data=? where id=?", (json.dumps(d), c["id"])); continue
                 st = str(info.get("status") or info.get("state") or c["status"]).lower()
+                if isinstance(info.get("transcript"), str):
+                    try:
+                        import ast as _ast; info["transcript"] = _ast.literal_eval(info["transcript"])
+                    except Exception: pass
+                if isinstance(info.get("transcript"), list):
+                    info["transcript"] = [{"role": t.get("role"), "text": t.get("text")} for t in info["transcript"] if t.get("text") and t.get("role") in ("user", "assistant")]
                 d["provider_call"] = info
                 engine.db.ex("update calls set status=?, data=? where id=?", (st, json.dumps(d), c["id"]))
                 if st != c["status"]:
