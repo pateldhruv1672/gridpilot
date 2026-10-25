@@ -137,11 +137,19 @@ class Desk:
         remit_ok = d.get("remit_to") == v["remit"]; dom_ok = d.get("from_email", "").endswith("@" + v["domain"])
         chk("remit_to_matches_master", remit_ok, "invoice remit-to %s vs master %s" % (d.get("remit_to"), v["remit"]), "vendor master", "high" if not remit_ok else "info")
         chk("sender_domain", dom_ok, "sent from %s; vendor domain %s" % (d.get("from_email"), v["domain"]), "email header", "high" if not dom_ok else "info")
-        c = next((k for k, x in CONTRACTS.items() if x["vendor"] == r["vendor"]), None); ct = CONTRACTS.get(c)
-        expected = 0.0
+        # contract lookup is per (vendor, SKU): a line is only priced against a contract that actually covers that SKU
+        vcon = {k: x for k, x in CONTRACTS.items() if x["vendor"] == r["vendor"]}
+        expected = 0.0; uncovered = []; line_ct = []
         for l in d["lines"]:
-            rate_ok = ct and abs(l["rate"] - ct["rate"]) < 1e-9
-            chk("rate_vs_contract", bool(rate_ok), "%s billed at $%s vs contract %s $%s" % (l["sku"], l["rate"], c, ct and ct["rate"]), ct and ct["source"], "medium" if not rate_ok else "info")
+            ck = next((k for k, x in vcon.items() if x["sku"] == l["sku"]), None)
+            line_ct.append(ck)
+            if not ck:
+                uncovered.append(l)
+                chk("sku_on_contract", False, "%s is not on any %s contract or PO (on file: %s)" % (l["sku"], v["name"], ", ".join("%s %s" % (k, x["sku"]) for k, x in vcon.items()) or "none"), "contract register", "high")
+                continue
+            x = CONTRACTS[ck]; rate_ok = abs(l["rate"] - x["rate"]) < 1e-9
+            chk("rate_vs_contract", rate_ok, "%s billed at $%s vs contract %s $%s per %s" % (l["sku"], l["rate"], ck, x["rate"], x["unit"]), x["source"], "medium" if not rate_ok else "info")
+        c = next((k for k in line_ct if k), None); ct = CONTRACTS.get(c)
         # metered usage
         meter = None
         if r["vendor"] == "ACX" and d.get("incident"):
@@ -153,7 +161,7 @@ class Desk:
             expected = round(meter["qty"] * ct["rate"], 2)
             diff = round(billed_qty - meter["qty"], 4)
             chk("quantity_vs_meter", abs(diff) < 1e-6, "billed %s vs metered %s (%s)" % (billed_qty, meter["qty"], meter["ref"]), meter["id"], "medium" if abs(diff) > 1e-6 else "info")
-        elif ct and ct["unit"] == "job":
+        elif ct and ct["unit"] == "job" and not uncovered:
             expected = ct["rate"]; chk("po_match", d.get("po") == "PO-7731", "invoice PO %s, PO amount $%.2f" % (d.get("po"), ct["rate"]), ct["source"])
         # duplicates: same vendor, same incident/period and lines, another invoice already received/approved/paid
         dup = None
@@ -176,10 +184,15 @@ class Desk:
             return self._decide(r, checks, "hold", 0.0, "Payment details differ from the vendor master and the request came from %s. Hold, verify by calling %s at the number on file (%s), never the number in the email." % (d.get("from_email"), v["name"], v["phone_on_file"]))
         if dup: return self._decide(r, checks, "dispute", 0.0, "Duplicate of %s: dispute in full." % dup)
         if same_use: return self._decide(r, checks, "dispute", 0.0, "Usage already billed on %s: dispute." % same_use)
-        price_bad = [l for l in d["lines"] if ct and abs(l["rate"] - ct["rate"]) > 1e-9]
-        if price_bad:
-            contract_amt = round(sum(l["qty"] * ct["rate"] for l in d["lines"]), 2)
-            return self._decide(r, checks, "dispute", contract_amt, "Billed rate $%s differs from the contracted $%s (%s). Price variances are disputed at any amount: pay $%.2f at contract and dispute $%.2f." % (price_bad[0]["rate"], ct["rate"], ct["source"], contract_amt, round(amount - contract_amt, 2)))
+        if uncovered:
+            return self._decide(r, checks, "hold", 0.0, "%s not covered by any contract or PO with %s. Hold for controller review: do not pay or dispute until the line is matched to an agreement." % (", ".join(sorted({l["sku"] for l in uncovered})), v["name"]))
+        over = [(l, CONTRACTS[k]) for l, k in zip(d["lines"], line_ct) if l["rate"] > CONTRACTS[k]["rate"] + 1e-9]
+        if over:
+            contract_amt = round(sum(min(l["usd"], l["qty"] * CONTRACTS[k]["rate"]) for l, k in zip(d["lines"], line_ct)), 2)
+            l0, x0 = over[0]
+            return self._decide(r, checks, "dispute", contract_amt, "Billed rate $%s exceeds the contracted $%s (%s). Price variances are disputed at any amount: pay $%.2f at contract and dispute $%.2f." % (l0["rate"], x0["rate"], x0["source"], contract_amt, round(amount - contract_amt, 2)))
+        under = [l for l, k in zip(d["lines"], line_ct) if l["rate"] < CONTRACTS[k]["rate"] - 1e-9]
+        if under: chk("billed_below_contract", True, "billed below contract rate on %s; pay as billed, never more" % ", ".join(l["sku"] for l in under), "contract register", "info")
         variance = round(amount - expected, 2) if expected else 0.0
         if expected and variance > POLICY["materiality_usd"]:
             return self._decide(r, checks, "dispute", expected, "Billed $%.2f vs expected $%.2f (metered quantity x contract rate). Pay the contract amount and dispute the $%.2f difference." % (amount, expected, variance))
@@ -189,6 +202,9 @@ class Desk:
         return self._decide(r, checks, "approve", amount, "Three-way match passed (contract, meter, invoice)." + note)
 
     def _decide(self, r, checks, decision, amount, reason, credits=None):
+        if decision in ("approve", "short_pay", "dispute") and amount > r["amount"] + 0.005:     # sanity: never pay more than billed
+            checks.append({"name": "pay_not_above_billed", "ok": False, "detail": "computed payment $%.2f exceeded billed $%.2f; capped and held" % (amount, r["amount"]), "source": "control", "severity": "high"})
+            decision, amount, reason = "hold", 0.0, "Computed payment $%.2f is above the billed $%.2f, which should never happen. Hold for controller review." % (amount, r["amount"])
         need = "agent" if decision == "approve" and amount <= POLICY["agent_approval_limit_usd"] and all(c["ok"] or c["severity"] == "info" for c in checks) else "controller"
         return {"invoice_id": r["id"], "decision": decision, "amount": round(amount, 2), "reason": reason, "checks": checks, "credits": credits or [], "approver_required": need,
                 "segregation": "requested by %s; cannot be approved by the requester" % PEOPLE.get(json.loads(r["data"]).get("requested_by"), "n/a") if json.loads(r["data"]).get("requested_by") else None}
