@@ -380,8 +380,8 @@ function useGridpilot() {
 function Metric({ label, value, unit, sub, tone }) {
   return <div className="flex-1 min-w-[150px] px-4 py-2.5" style={{ borderRight: '1px solid ' + C.line }}>
     <Label>{label}</Label>
-    <div className="flex items-baseline gap-1.5 mt-1"><span style={{ font: '500 22px ' + MONO, color: tone || C.text, letterSpacing: '-0.02em' }}>{value}</span><span style={{ font: '500 11px ' + MONO, color: C.mute }}>{unit}</span></div>
-    <div style={{ font: '10.5px ' + MONO, color: C.dim, marginTop: 1 }}>{sub}</div>
+    <div className="flex items-baseline gap-1.5 mt-1 gp-nw"><span style={{ font: '500 22px ' + MONO, color: tone || C.text, letterSpacing: '-0.02em' }}>{value}</span><span style={{ font: '500 11px ' + MONO, color: C.mute }}>{unit}</span></div>
+    <div className="truncate" style={{ font: '10.5px ' + MONO, color: C.dim, marginTop: 1 }} title={sub}>{sub}</div>
   </div>;
 }
 
@@ -538,7 +538,7 @@ function BottomStrip({ g, open, setOpen }) {
   </div>;
 }
 
-function ControlRoom({ g, setModal, toast }) {
+function ControlRoom({ g, setModal, toast, narrow }) {
   const [opts, setOpts] = React.useState({ mode: 'combined', density: 0.7, intensity: 1, paused: false, labels: false });
   const [sel, setSel] = React.useState(null); const [cmd, setCmd] = React.useState({ n: 0 }); const [strip, setStrip] = React.useState(true);
   const snap = g.snapRef.current; const selR = snap && sel != null ? snap.racks[sel] : null;
@@ -546,11 +546,11 @@ function ControlRoom({ g, setModal, toast }) {
   const set = (k, v) => setOpts(o => ({ ...o, [k]: v }));
   const camBtn = (kind, label) => <button onClick={() => setCmd(c => ({ n: c.n + 1, kind }))} style={{ font: '500 10.5px ' + MONO, color: C.mute, padding: '4px 8px', borderRadius: 6, border: '1px solid ' + C.line }}>{label}</button>;
   const lat = snap ? snap.latency : {};
-  return <div className="flex flex-col min-h-0 flex-1">
-    <div className="flex flex-1 min-h-0">
-      <div className="relative min-w-0" style={{ flex: '0 0 65%' }}>
+  return <div className={'flex flex-col min-h-0 flex-1' + (narrow ? ' overflow-auto' : '')}>
+    <div className={narrow ? 'flex flex-col' : 'flex flex-1 min-h-0'}>
+      <div className="relative min-w-0" style={narrow ? { height: 460, flexShrink: 0 } : { flex: '0 0 65%' }}>
         <DataCenterScene snapRef={g.snapRef} opts={opts} selected={sel} onSelect={onSelect} camCmd={cmd} />
-        <div className="absolute left-3 top-3 flex flex-col gap-2 pointer-events-auto">
+        <div className="absolute left-3 top-3 flex flex-col gap-2 pointer-events-auto" style={{ maxWidth: narrow ? 'calc(100% - 24px)' : undefined }}>
           <div className="flex rounded-full p-0.5" style={{ background: 'rgba(16,24,38,.85)', border: '1px solid ' + C.line2 }}>
             {['thermal', 'airflow', 'power', 'workload', 'combined'].map(m => <button key={m} onClick={() => set('mode', m)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '5px 11px', letterSpacing: '.02em', color: opts.mode === m ? '#04121a' : C.mute, background: opts.mode === m ? C.cyan : 'transparent' }}>{m[0].toUpperCase() + m.slice(1)}</button>)}
           </div>
@@ -561,7 +561,7 @@ function ControlRoom({ g, setModal, toast }) {
             <button onClick={() => set('labels', !opts.labels)} style={{ color: opts.labels ? C.cyan : C.mute }}>labels</button>
           </div>
         </div>
-        <div className="absolute right-3 top-3 flex gap-1.5" style={{ background: 'rgba(16,24,38,.8)', padding: 4, borderRadius: 8, border: '1px solid ' + C.line }}>
+        <div className="absolute right-3 flex gap-1.5" style={{ top: narrow ? 104 : 12, background: 'rgba(16,24,38,.8)', padding: 4, borderRadius: 8, border: '1px solid ' + C.line }}>
           {camBtn('reset', 'Reset')}{camBtn('iso', '3D iso')}{camBtn('top', '2D top')}{camBtn('focus', 'Focus')}
         </div>
         <div className="absolute left-3 bottom-3 px-3 py-2 rounded-lg" style={{ background: 'rgba(16,24,38,.82)', border: '1px solid ' + C.line, font: '10px ' + MONO, color: C.mute }}>
@@ -576,7 +576,7 @@ function ControlRoom({ g, setModal, toast }) {
           <div className="mt-2" style={{ font: '10px/1.5 ' + MONO, color: C.mute }}>{selR.workloads.map(w => <div key={w} className="flex justify-between"><span>{w}</span><span style={{ color: lat[w] && lat[w].breach ? C.red : C.dim }}>{lat[w] ? lat[w].p95_ms + '/' + lat[w].limit_ms + 'ms' : ''}</span></div>)}</div>
         </div>}
       </div>
-      <div className="min-w-0 overflow-auto" style={{ flex: '0 0 35%', borderLeft: '1px solid ' + C.line, background: C.p1 }}>
+      <div className="min-w-0 overflow-auto" style={narrow ? { borderTop: '1px solid ' + C.line, background: C.p1 } : { flex: '0 0 35%', borderLeft: '1px solid ' + C.line, background: C.p1 }}>
         <IncidentPanel g={g} setModal={setModal} toast={toast} />
       </div>
     </div>
@@ -585,10 +585,40 @@ function ControlRoom({ g, setModal, toast }) {
 }
 
 const ST_COLOR = { awaiting_controller: '#FFBB55', held: '#FF596E', dispute_drafted: '#FF596E', disputed: '#FF596E', partially_disputed: '#FFBB55', approved: '#4FE0A5', paid: '#4FE0A5', received: '#8A9BB0', disputed_resolved: '#56677C' };
-function FinanceDesk({ g, toast }) {
+const INV_PRESETS = [
+  ['Bank change', { vendor: 'NBT', number: 'NBT-5604', sku: 'INTERZONE-GB', qty: '40', rate: '0.25', remit_to: 'Chase Bank ••7781', from_email: 'billing@northbeam-transit-billing.com', note: 'We moved banks. Please pay this and future invoices to the new account today.' }],
+  ['Price creep', { vendor: 'ACX', number: 'ACX-88301', sku: 'RESERVE-GPU-H100', qty: '6', rate: '3.95', note: '' }],
+  ['Over-billed usage', { vendor: 'NBT', number: 'NBT-5611', sku: 'INTERZONE-GB', qty: '900', rate: '0.25', note: '' }],
+  ['Unknown vendor', { vendor: 'ZEN', vendor_name: 'Zenith Facility Services', number: 'ZEN-0042', sku: 'JANITORIAL', qty: '1', rate: '780', remit_to: 'Wells Fargo ••2210', from_email: 'ar@zenith-fs.com', note: '' }],
+];
+function NewInvoice({ g, toast, onClose, onDone }) {
+  const [f, setF] = React.useState({ vendor: 'ACX', vendor_name: '', number: '', incident: '', sku: 'RESERVE-GPU-H100', qty: '6', rate: '3.85', remit_to: '', from_email: '', note: '' });
+  const [busy, setBusy] = React.useState(false);
+  const set = (k, v) => setF(x => ({ ...x, [k]: v }));
+  const field = { background: C.p1, border: '1px solid ' + C.line2, color: C.text, font: '11.5px ' + SANS, borderRadius: 8, padding: '6px 9px', outline: 'none', width: '100%' };
+  const submit = async () => { setBusy(true); try { const r = await g.api('/api/finance/invoices', 'POST', { vendor: f.vendor, vendor_name: f.vendor_name, number: f.number, incident: f.incident, remit_to: f.remit_to, from_email: f.from_email, note: f.note, lines: [{ sku: f.sku, qty: +f.qty, rate: +f.rate }] }); toast(r.message, 'ok'); onDone(r.invoice_id); } catch (e) { toast(e.message, 'err'); } setBusy(false); };
+  const row = (k, label, ph) => <label className="flex flex-col gap-1"><span style={{ font: '600 9px ' + MONO, letterSpacing: '.14em', color: C.dim, textTransform: 'uppercase' }}>{label}</span><input value={f[k]} placeholder={ph} onChange={e => set(k, e.target.value)} onKeyDown={e => e.stopPropagation()} style={field} /></label>;
+  return <Modal title="Submit a test invoice" onClose={onClose}>
+    <div style={{ font: '11.5px/1.55 ' + SANS, color: C.mute }}>Try your own scenario. The invoice lands in the inbox and goes through the same autonomous pass as everything else: three-way match against the contract, the meter and the vendor master, then approval limits and segregation of duties. Then use Ask why or Run AP review (CREAO).</div>
+    <div className="flex flex-wrap gap-1.5 mt-3">{INV_PRESETS.map(([l, p]) => <Btn key={l} small onClick={() => setF(x => ({ ...x, vendor_name: '', remit_to: '', from_email: '', incident: '', ...p }))}>{l}</Btn>)}</div>
+    <div className="grid gap-2.5 mt-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+      <label className="flex flex-col gap-1"><span style={{ font: '600 9px ' + MONO, letterSpacing: '.14em', color: C.dim }}>VENDOR</span><select value={['ACX', 'BPC', 'NBT', 'CTS'].includes(f.vendor) ? f.vendor : 'OTHER'} onChange={e => set('vendor', e.target.value === 'OTHER' ? 'NEW' : e.target.value)} style={field}><option value="ACX">ACX · Atlas Capacity Exchange</option><option value="BPC">BPC · Bay Power Co-op</option><option value="NBT">NBT · Northbeam Transit</option><option value="CTS">CTS · CoolTech Services</option><option value="OTHER">Other (not in vendor master)</option></select></label>
+      {!['ACX', 'BPC', 'NBT', 'CTS'].includes(f.vendor) && row('vendor', 'Vendor code', 'e.g. ZEN')}
+      {!['ACX', 'BPC', 'NBT', 'CTS'].includes(f.vendor) && row('vendor_name', 'Vendor name', 'Zenith Facility Services')}
+      {row('number', 'Invoice number', 'auto if blank')}
+      {row('incident', 'Incident (optional)', 'INC-041')}
+      {row('sku', 'Line SKU', '')}{row('qty', 'Quantity', '')}{row('rate', 'Rate $', '')}
+      {row('remit_to', 'Remit to', 'blank = bank account on file')}{row('from_email', 'Sent from', 'blank = vendor domain')}
+    </div>
+    <div className="mt-2.5">{row('note', 'Message on invoice', 'optional')}</div>
+    <div className="flex justify-between items-center mt-3"><span style={{ font: '11px ' + MONO, color: C.mute }}>Total {fmt$((+f.qty || 0) * (+f.rate || 0))}</span><Btn tone="primary" disabled={busy || !f.vendor || !(+f.qty > 0) || !(+f.rate > 0)} onClick={submit}>{busy ? 'Submitting…' : 'Submit invoice'}</Btn></div>
+  </Modal>;
+}
+
+function FinanceDesk({ g, toast, narrow }) {
   const st = g.state; const D = st && st.desk; const inc = st && st.incident;
   const [sub, setSub] = React.useState('inbox'); const [sel, setSel] = React.useState(null); const [note, setNote] = React.useState(''); const [busy, setBusy] = React.useState(false);
-  const [groupBy, setGroupBy] = React.useState('service');
+  const [groupBy, setGroupBy] = React.useState('service'); const [askQ, setAskQ] = React.useState(''); const [newInv, setNewInv] = React.useState(false);
   if (!D) return <div className="flex-1 p-6" style={{ background: C.bg, color: C.mute, font: '12px ' + SANS }}>Loading finance desk…</div>;
   const act = async (path, body, okMsg) => { setBusy(true); try { const r = await g.api(path, 'POST', body || {}); toast(r.message || okMsg, r.ok === false ? 'err' : 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(false); };
   const pending = D.invoices.filter(i => !['paid', 'disputed_resolved'].includes(i.status));
@@ -616,17 +646,19 @@ function FinanceDesk({ g, toast }) {
   const plan = inc && inc.plans && inc.plans.slice(-1)[0]; const b52 = D.budgets['5200'];
   return <div className="flex-1 min-h-0 flex flex-col" style={{ background: C.bg }}>
     <div className="flex items-center gap-1 px-4 pt-3 pb-2 flex-wrap" style={{ borderBottom: '1px solid ' + C.line }}>
-      <div className="mr-3"><Label color={C.cyan}>Atlas Compute · finance desk</Label><div style={{ font: '500 12px ' + SANS, color: C.text, marginTop: 2 }}>Seats: AP analyst + cost controller (autonomous), signing off with the human controller</div></div>
+      <div className="mr-3"><Label color={C.cyan}>Hyphenate track · the Hyphenated Enterprise</Label><div style={{ font: '500 12px ' + SANS, color: C.text, marginTop: 2 }}>Atlas Compute's AP analyst and cost controller seats, run autonomously. The human controller signs off.</div></div>
       {tabs.map(([k, l, n]) => <button key={k} onClick={() => setSub(k)} className="rounded-full" style={{ font: '600 11px ' + SANS, padding: '5px 12px', color: sub === k ? '#04121a' : C.mute, background: sub === k ? C.cyan : 'transparent', border: '1px solid ' + (sub === k ? C.cyan : C.line) }}>{l}{n != null ? ' · ' + n : ''}</button>)}
       <div className="ml-auto flex gap-2 items-center">
         <span style={{ font: '10.5px ' + MONO, color: C.mute }}>score {D.score.correct}/{D.score.total} · planted errors caught {D.score.caught}/{D.score.planted_errors}</span>
+        <Btn small disabled={busy} onClick={() => setNewInv(true)}>+ Test invoice</Btn>
         <Btn small disabled={busy} onClick={() => act('/api/finance/ap-review', {}, 'AP review started')}>Run AP review (CREAO)</Btn>
         <Btn small tone="mint" disabled={busy || !approved.length} onClick={() => act('/api/finance/payment-run', {}, 'Payment run complete')}>Payment run · {approved.length}</Btn>
       </div>
     </div>
     {D.alerts.filter(a => a.status === 'open').slice(0, 3).map(a => <div key={a.id} className="px-4 py-1.5" style={{ font: '11px ' + MONO, color: a.severity === 'high' ? C.red : C.amber, background: a.severity === 'high' ? 'rgba(255,89,110,.06)' : 'rgba(255,187,85,.05)', borderBottom: '1px solid ' + C.line }}>▲ {a.kind.replace(/_/g, ' ')} · {a.text}</div>)}
-    {sub === 'inbox' && <div className="flex-1 min-h-0 grid" style={{ gridTemplateColumns: 'minmax(300px, 0.9fr) minmax(420px, 1.6fr)' }}>
-      <div className="overflow-auto" style={{ borderRight: '1px solid ' + C.line }}>
+    {newInv && <NewInvoice g={g} toast={toast} onClose={() => setNewInv(false)} onDone={(iid) => { setNewInv(false); setSub('inbox'); setSel(iid); }} />}
+    {sub === 'inbox' && <div className={'flex-1 min-h-0 grid' + (narrow ? ' overflow-auto' : '')} style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(300px, 0.9fr) minmax(420px, 1.6fr)', gridAutoRows: narrow ? 'max-content' : undefined }}>
+      <div className="overflow-auto" style={narrow ? { maxHeight: 280, borderBottom: '1px solid ' + C.line } : { borderRight: '1px solid ' + C.line }}>
         {apRun && <div className="px-3 py-2" style={{ borderBottom: '1px solid ' + C.line, font: '10.5px ' + MONO, color: C.mute }}>CREAO AP Analyst · {apRun.status}{apRun.creao_run_id ? ' · run ' + apRun.creao_run_id.slice(0, 8) : ''}</div>}
         {D.invoices.map(i => <button key={i.id} onClick={() => setSel(i.id)} className="w-full text-left px-3 py-2.5" style={{ borderBottom: '1px solid ' + C.line, background: inv && inv.id === i.id ? 'rgba(67,217,245,.06)' : 'transparent', opacity: ['paid', 'disputed_resolved'].includes(i.status) ? 0.55 : 1 }}>
           <div className="flex justify-between gap-2"><span style={{ font: '600 11.5px ' + MONO, color: C.text }}>{i.id}</span><span style={{ font: '500 11.5px ' + MONO, color: C.text }}>{fmt$(i.amount)}</span></div>
@@ -634,7 +666,7 @@ function FinanceDesk({ g, toast }) {
           {i.analysis && !['approved', 'paid'].includes(i.status) && <div className="mt-1" style={{ font: '10px ' + MONO, color: dec(i.analysis.decision) }}>→ {i.analysis.decision.replace('_', ' ')} {i.analysis.decision !== 'hold' ? fmt$(i.analysis.amount) : ''}{agentRecs(i).length ? ' · CREAO ' + agentRecs(i).slice(-1)[0].decision : ''}</div>}
         </button>)}
       </div>
-      <div className="overflow-auto p-4">{inv ? <div className="flex flex-col gap-3">
+      <div className={narrow ? 'p-4' : 'overflow-auto p-4'}>{inv ? <div className="flex flex-col gap-3">
         <div className="flex justify-between items-start gap-3"><div><div style={{ font: '600 15px ' + MONO, color: C.text }}>{inv.id} <span style={{ color: C.mute, fontWeight: 400 }}>· {inv.vendor_name}</span></div>
           <div style={{ font: '10.5px ' + MONO, color: C.dim, marginTop: 2 }}>issued {inv.date} · due {inv.due} · period {inv.period}{inv.po ? ' · ' + inv.po : ''} · from {inv.from_email || '—'} · remit {inv.remit_to || '—'}</div></div>{chip(inv.status.replace(/_/g, ' '), ST_COLOR[inv.status] || C.mute)}</div>
         {inv.note && <div className="p-2.5 rounded" style={{ background: 'rgba(255,89,110,.06)', border: '1px solid rgba(255,89,110,.3)', font: '11.5px/1.5 ' + SANS, color: '#ffc2ca' }}>Message on invoice: “{inv.note}”</div>}
@@ -650,6 +682,14 @@ function FinanceDesk({ g, toast }) {
           <div className="flex gap-2 flex-wrap"><Btn tone="mint" disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/approve', { note }, 'Approved and posted')}>Approve as controller</Btn>
             <Btn tone="danger" disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/dispute', { note }, 'Disputed')}>Dispute</Btn>
             <Btn disabled={busy} onClick={() => act('/api/finance/invoices/' + inv.id + '/hold', { note }, 'Held')}>Hold</Btn></div></div>}
+        <div className="p-3 rounded" style={{ background: 'rgba(67,217,245,.04)', border: '1px solid rgba(67,217,245,.22)' }}>
+          <Label color={C.cyan}>Ask why · CREAO Finance Explainer defends the call, citing its sources</Label>
+          <div className="flex flex-col gap-2 mt-2">{inv.decisions.filter(d => d.kind === 'question' || d.kind === 'explanation').map((d, k) => <div key={k} style={{ font: (d.kind === 'question' ? '600 ' : '') + '11.5px/1.55 ' + SANS, color: d.kind === 'question' ? C.text : '#c7d6e6', paddingLeft: d.kind === 'question' ? 0 : 10, borderLeft: d.kind === 'question' ? 'none' : '2px solid rgba(67,217,245,.35)', whiteSpace: 'pre-wrap' }}>{d.kind === 'question' ? 'Q · ' : ''}{d.reason}<div style={{ font: '9.5px ' + MONO, color: C.dim, fontWeight: 400 }}>{d.actor} · {new Date(d.ts * 1000).toLocaleTimeString()}</div></div>)}
+            {(() => { const qs = inv.decisions.filter(d => d.kind === 'question' || d.kind === 'explanation'); const last = qs[qs.length - 1]; return last && last.kind === 'question' && Date.now() / 1000 - last.ts < 600 ? <div className="animate-pulse" style={{ font: '10.5px ' + MONO, color: C.cyan }}>CREAO is reading the contract, meter, vendor history and decision log… (about a minute)</div> : null; })()}
+          </div>
+          <div className="flex gap-2 mt-2"><input value={askQ} onChange={e => setAskQ(e.target.value)} onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter' && askQ.trim()) { act('/api/finance/invoices/' + inv.id + '/ask', { question: askQ }, 'Asked'); setAskQ(''); } }} placeholder={'e.g. Why ' + (inv.analysis ? inv.analysis.decision.replace('_', ' ') : 'this') + ' instead of paying it?'} className="flex-1 rounded-full px-3 outline-none" style={{ background: C.p2, border: '1px solid ' + C.line2, color: C.text, font: '11.5px ' + SANS, height: 30 }} />
+            <Btn small disabled={busy || !askQ.trim()} onClick={() => { act('/api/finance/invoices/' + inv.id + '/ask', { question: askQ }, 'Asked'); setAskQ(''); }}>Ask why</Btn></div>
+        </div>
         <Label>Audit trail</Label>
         <div className="flex flex-col gap-0.5">{inv.decisions.map((d, k) => <div key={k} style={{ font: '10.5px/1.5 ' + MONO, color: C.mute }}>{new Date(d.ts * 1000).toLocaleString()} · <span style={{ color: C.text }}>{d.actor}</span> · {d.kind} · {d.decision}{d.amount ? ' ' + fmt$(d.amount) : ''}</div>)}</div>
       </div> : <div style={{ color: C.mute, font: '12px ' + SANS }}>No invoices.</div>}</div>
@@ -724,7 +764,7 @@ function SpecialistsPanel({ g, inc }) {
   </Panel>;
 }
 
-function AgentOps({ g }) {
+function AgentOps({ g, narrow }) {
   const st = g.state; const inc = st && st.incident; const evs = (st && st.events) || [];
   const [selE, setSelE] = React.useState(null);
   const runs = (inc && inc.agent_runs) || []; const calls = (inc && inc.calls) || []; const tools = (inc && inc.tool_calls) || [];
@@ -735,15 +775,16 @@ function AgentOps({ g }) {
   const toolFor = ev && (ev.type === 'agent_tool_call' || ev.type === 'voice_tool_call') ? tools.filter(t => t.tool === ev.data.tool && Math.abs(t.ts - ev.ts) < 3).slice(-1)[0] : null;
   const plan = inc && inc.plans && inc.plans.slice(-1)[0]; const exec = inc && inc.executions && inc.executions.slice(-1)[0];
   const appr = inc && inc.approvals && inc.approvals.filter(a => a.status === 'approved').slice(-1)[0];
-  const agent = (name, role, status, detail, ok) => <Panel style={{ padding: 10 }}><div className="flex justify-between"><span style={{ font: '600 12px ' + SANS, color: C.text }}>{name}</span><span style={{ font: '600 9.5px ' + MONO, color: ok ? C.mint : ok === false ? C.red : C.amber }}>{status}</span></div><div style={{ font: '10px ' + MONO, color: C.dim }}>{role}</div><div style={{ font: '10.5px/1.5 ' + MONO, color: C.mute, marginTop: 4 }}>{detail}</div></Panel>;
+  const agent = (name, role, status, detail, ok) => <Panel style={{ padding: 10 }}><div className="flex justify-between items-start gap-2"><span style={{ font: '600 12px/1.35 ' + SANS, color: C.text }}>{name}</span><span className="gp-nw" style={{ font: '600 9.5px/1.6 ' + MONO, color: ok ? C.mint : ok === false ? C.red : C.amber }}>{status}</span></div><div style={{ font: '10px/1.45 ' + MONO, color: C.dim, marginTop: 2 }}>{role}</div><div style={{ font: '10.5px/1.5 ' + MONO, color: C.mute, marginTop: 4, overflowWrap: 'anywhere' }}>{detail}</div></Panel>;
   const lr = runs.slice(-1)[0]; const lc = calls.slice(-1)[0];
-  return <div className="flex-1 min-h-0 grid gap-3 p-3" style={{ gridTemplateColumns: 'minmax(230px,.9fr) minmax(300px,1.3fr) minmax(300px,1.2fr)', background: C.bg }}>
+  return <div className={'flex-1 min-h-0 grid gap-3 p-3' + (narrow ? ' overflow-auto' : '')} style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(230px,.9fr) minmax(300px,1.3fr) minmax(300px,1.2fr)', gridAutoRows: narrow ? 'max-content' : undefined, background: C.bg }}>
     <div className="flex flex-col gap-2 overflow-auto">
       <Label>Active agents</Label>
       {agent('CREAO Remediation Agent', 'diagnosis · planning · finance reasoning · replanning · summaries', lr ? lr.status : (it && (it.creao.app_id_set || (it.creao_cli && it.creao_cli.available)) ? 'idle' : 'not connected'), lr ? lr.task + (lr.provider_run_id ? ' · run ' + lr.provider_run_id : '') + ' · ' + ago(lr.created) : 'one CREAO agent, invoked per task with a scoped tool token', lr ? lr.status === 'completed' : null)}
       <SpecialistsPanel g={g} inc={inc} />
       {agent('Finance engine', 'deterministic forecasts, rate cards, reconciliation', 'running', 'All arithmetic in backend code; CREAO explains and compares.', true)}
-      {agent('Cartesia Voice Operator', 'outbound call · Q&A · alternatives · approval intent', lc ? lc.status : (it && it.cartesia.agent_id ? 'ready' : 'not set up'), lc ? (lc.data.agent_call_id || lc.data.error || '') : 'Managed Agent with 6 webhook tools', lc ? lc.status !== 'failed' : null)}
+      {(() => { const opOk = it && it.cartesia.operator && it.cartesia.operator.consent; const stale = lc && lc.status === 'failed' && opOk && /operator/i.test(lc.data.error || ''); const useLc = lc && !stale;
+        return agent('Cartesia Voice Operator', 'outbound call · Q&A · alternatives · approval intent', useLc ? lc.status : (it && it.cartesia.agent_id ? (opOk ? 'ready' : 'needs operator') : 'not set up'), useLc ? (lc.data.agent_call_id || lc.data.error || '') : (opOk ? 'Calls ' + it.cartesia.operator.name + ' ' + it.cartesia.operator.phone_masked + ' from +1 618-427-8064 when a plan needs approval' : 'Register the operator phone in Connections'), useLc ? lc.status !== 'failed' : (opOk ? true : null)); })()}
       {agent('Policy engine', 'deterministic authorization', 'enforcing', plan ? plan.plan_id + ' v' + plan.version + ': ' + plan.policy.decision : 'auto · approval · forbidden tiers', true)}
       {agent('Config executor', 'git config store · validation · rollback', exec ? exec.state : 'idle', exec ? (exec.data.applied_sha || '').slice(0, 10) + ' ' + (exec.data.rollback ? 'rolled back → ' + exec.data.rollback.sha.slice(0, 10) : '') : 'isolated worktrees, snapshots before apply', exec ? exec.state !== 'rolled_back' : null)}
       <Panel style={{ padding: 10 }}><Label color={C.cyan}>System evidence</Label>
@@ -816,6 +857,10 @@ function Settings({ g, toast }) {
 
 function UserDiv() {
   const g = useGridpilot();
+  const rootRef = React.useRef(null); const [W, setW] = React.useState(1400); const [fs, setFs] = React.useState(false);
+  React.useEffect(() => { const el = rootRef.current; if (!el) return; const ro = new ResizeObserver(() => setW(el.clientWidth || 1400)); ro.observe(el); const onFs = () => setFs(document.fullscreenElement === el); document.addEventListener('fullscreenchange', onFs); return () => { ro.disconnect(); document.removeEventListener('fullscreenchange', onFs); }; });
+  const narrow = W < 1180;
+  const toggleFs = async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else await rootRef.current.requestFullscreen(); } catch (e) { } };
   const [tab, setTab] = React.useState('control'); const [modal, setModal] = React.useState(null); const [toasts, setToasts] = React.useState([]); const [demoOpen, setDemoOpen] = React.useState(false);
   const [rej, setRej] = React.useState(''); const [diffs, setDiffs] = React.useState({});
   const toast = React.useCallback((msg, kind) => { const id = Math.random(); setToasts(t => [...t, { id, msg, kind }]); setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4200); }, []);
@@ -831,18 +876,20 @@ function UserDiv() {
   const plan = inc && inc.plans && inc.plans.slice(-1)[0]; const exec = inc && inc.executions && inc.executions.slice(-1)[0];
   React.useEffect(() => { if (modal && modal.kind === 'diff' && st) { (st.config_log || []).slice(0, 6).forEach(async c => { if (diffs[c.sha]) return; try { const r = await g.api('/api/config/diff/' + c.sha); setDiffs(d => ({ ...d, [c.sha]: r.diff })); } catch (e) { } }); } }, [modal]);
   if (g.error) return <div className="w-full p-6" style={{ background: C.bg, color: C.red, font: '13px ' + MONO }}>Backend unreachable: {g.error.message}</div>;
-  return <div className="w-full relative flex flex-col overflow-hidden" style={{ height: 'var(--mana-app-height, 82vh)', background: C.bg, color: C.text, fontFamily: SANS, backgroundImage: 'linear-gradient(rgba(67,217,245,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(67,217,245,0.025) 1px, transparent 1px)', backgroundSize: '28px 28px' }}>
-    <div className="flex items-center gap-4 px-4 flex-shrink-0" style={{ height: 52, borderBottom: '1px solid ' + C.line, background: 'rgba(10,15,25,.9)' }}>
+  return <div ref={rootRef} className="gp-root w-full relative flex flex-col overflow-hidden" style={{ height: fs ? '100vh' : 'var(--mana-app-height, 82vh)', background: C.bg, color: C.text, fontFamily: SANS, backgroundImage: 'linear-gradient(rgba(67,217,245,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(67,217,245,0.025) 1px, transparent 1px)', backgroundSize: '28px 28px' }}>
+    <style>{'.gp-root .gp-nw{white-space:nowrap} .gp-root button{white-space:nowrap}'}</style>
+    <div className="flex items-center flex-wrap gap-x-4 gap-y-1.5 px-4 py-2 flex-shrink-0" style={{ minHeight: 52, borderBottom: '1px solid ' + C.line, background: 'rgba(10,15,25,.9)' }}>
       <div className="flex items-center gap-2"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke={C.cyan} strokeWidth="1.6" /><path d="M7 15l3-3 3 2 4-5" stroke={C.cyan} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /><circle cx="17" cy="9" r="1.6" fill={C.red} /></svg>
         <span style={{ font: '600 13px ' + SANS, letterSpacing: '.14em' }}>GRIDPILOT</span></div>
-      <span style={{ font: '500 10.5px ' + MONO, color: C.mute, letterSpacing: '.12em' }}>ATLAS COMPUTE · SFO-01 · <span style={{ color: g.conn === 'live' ? C.mint : C.amber }}>{g.conn === 'live' ? 'SIMULATION LIVE' : g.conn.toUpperCase()}</span></span>
-      <div className="flex ml-4 gap-1">{[['control', 'Control Room'], ['finops', 'Finance desk'], ['agents', 'Agent Operations'], ['settings', 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
-      <div className="ml-auto flex items-center gap-4" style={{ font: '500 10.5px ' + MONO, color: C.mute }}>
-        <span>HEALTH <b style={{ color: health[1] }}>{health[0]}</b></span>
-        <span>INCIDENT <b style={{ color: inc && inc.state !== 'CLOSED' ? C.red : C.mint }}>{inc && inc.state !== 'CLOSED' ? inc.severity + ' ' + inc.id : 'NONE'}</b></span>
-        <span>T+{snap ? fmtT(snap.t) : '--:--'}</span>
-        <span>MODE <b style={{ color: C.cyan }}>AUTONOMOUS · HUMAN-GATED</b></span>
-        {userId === ownerId ? <span title="Verified Mana identity used for console approvals">OP {userId.slice(0, 6)}</span> : <span title="Live view for visitors. Approvals, payments and settings belong to the operator." style={{ color: C.amber }}>VISITOR · LIVE VIEW</span>}
+      <span className="gp-nw" style={{ font: '500 10.5px ' + MONO, color: C.mute, letterSpacing: '.12em' }}>{narrow ? '' : 'ATLAS COMPUTE · SFO-01 · '}<span style={{ color: g.conn === 'live' ? C.mint : C.amber }}>{g.conn === 'live' ? 'SIMULATION LIVE' : g.conn.toUpperCase()}</span></span>
+      <div className="flex gap-1 flex-wrap">{[['control', 'Control Room'], ['finops', narrow ? 'Finance' : 'Finance desk'], ['agents', narrow ? 'Agents' : 'Agent Operations'], ['settings', 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
+      <div className="ml-auto flex items-center flex-wrap gap-x-4 gap-y-1 gp-hdr" style={{ font: '500 10.5px ' + MONO, color: C.mute }}>
+        <span className="gp-nw">HEALTH <b style={{ color: health[1] }}>{health[0]}</b></span>
+        <span className="gp-nw">INCIDENT <b style={{ color: inc && inc.state !== 'CLOSED' ? C.red : C.mint }}>{inc && inc.state !== 'CLOSED' ? inc.severity + ' ' + inc.id : 'NONE'}</b></span>
+        <span className="gp-nw">T+{snap ? fmtT(snap.t) : '--:--'}</span>
+        <Btn small onClick={toggleFs} title="Full screen (Esc to exit). Best for demos.">{fs ? '⤡ Exit full screen' : '⤢ Full screen'}</Btn>
+        {!narrow && <span className="gp-nw">MODE <b style={{ color: C.cyan }}>AUTONOMOUS · HUMAN-GATED</b></span>}
+        {userId === ownerId ? <span className="gp-nw" title="Verified Mana identity used for console approvals">OP {userId.slice(0, 6)}</span> : <span title="Live view for visitors. Approvals, payments and settings belong to the operator." style={{ color: C.amber }}>VISITOR · LIVE VIEW</span>}
         <div className="relative"><Btn small onClick={() => setDemoOpen(!demoOpen)}>Demo ▾</Btn>
           {demoOpen && <div className="absolute right-0 mt-2 z-50 flex flex-col py-1" style={{ width: 230, background: C.p2, border: '1px solid ' + C.line2, borderRadius: 10, boxShadow: '0 20px 50px rgba(0,0,0,.5)' }}>
             {[['thermal', 'Start thermal incident (C02 degrades)'], ['arm_post_apply_failure', 'Arm post-apply failure (rollback demo)'], ['repair_c02', 'Repair C02'], ['repair_rack_faults', 'Repair rack fan faults'], ['reset', 'Reset demo']].map(([k, l]) => <button key={k} onClick={() => demo(k)} className="text-left px-3 py-2 hover:bg-white/5" style={{ font: '11.5px ' + SANS, color: k === 'reset' ? C.amber : C.text }}>{l}</button>)}
@@ -851,15 +898,15 @@ function UserDiv() {
           </div>}</div>
       </div>
     </div>
-    <div className="flex flex-shrink-0" style={{ borderBottom: '1px solid ' + C.line, background: 'rgba(16,24,38,.6)' }}>
+    <div className="flex flex-wrap flex-shrink-0" style={{ borderBottom: '1px solid ' + C.line, background: 'rgba(16,24,38,.6)' }}>
       <Metric label="IT · facility power" value={tot ? tot.it_kw.toFixed(0) : '—'} unit={'kW · ' + (tot ? tot.facility_kw.toFixed(0) : '—') + ' kW'} sub="64 racks · 512 GPUs (simulated)" />
       <Metric label="GPU utilization" value={tot ? (tot.gpu_util * 100).toFixed(1) : '—'} unit="%" sub={crit + ' critical · ' + elev + ' elevated racks'} tone={crit ? C.red : undefined} />
       <Metric label="PUE" value={tot ? tot.pue.toFixed(3) : '—'} unit="" sub={snap ? 'C02 effectiveness ' + Math.round(snap.cooling[1].effectiveness * 100) + '%' : ''} tone={tot && tot.pue > 1.41 ? C.amber : undefined} />
       <Metric label="SLA risk · exposure" value={breaches} unit={breaches === 1 ? 'breach' : 'breaches'} sub={exposure ? fmt$(exposure) + '/min if sustained (conditional)' : 'no conditional exposure'} tone={breaches ? C.red : C.mint} />
     </div>
-    {tab === 'control' && <ControlRoom g={g} setModal={setModal} toast={toast} />}
-    {tab === 'finops' && <FinanceDesk g={g} toast={toast} />}
-    {tab === 'agents' && <AgentOps g={g} />}
+    {tab === 'control' && <ControlRoom g={g} setModal={setModal} toast={toast} narrow={narrow} />}
+    {tab === 'finops' && <FinanceDesk g={g} toast={toast} narrow={narrow} />}
+    {tab === 'agents' && <AgentOps g={g} narrow={narrow} />}
     {tab === 'settings' && <Settings g={g} toast={toast} />}
     <CallOverlay g={g} />
     {modal && modal.kind === 'diff' && <Modal wide title={'Configuration changes' + (plan ? ' · ' + plan.plan_id + ' v' + plan.version : '')} onClose={() => setModal(null)}>

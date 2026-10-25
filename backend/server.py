@@ -398,6 +398,7 @@ async def api_desk(req): viewer(req); return jresp(DESK.snapshot())
 
 @routes.post("/api/finance/invoices/{id}/{action}")
 async def api_inv_action(req):
+    if req.match_info["action"] == "ask": return await api_inv_ask(req)
     uid = owner_only(req); b = await req.json() if req.can_read_body else {}
     try: r = DESK.controller_action(req.match_info["id"], req.match_info["action"], uid, (b or {}).get("note", ""))
     except ValueError as ex: return jresp({"ok": False, "message": str(ex)}, 400)
@@ -425,6 +426,43 @@ async def api_ap_review(req):
     if aid: await ENG._start_cli_run(local, aid)
     DIRTY["v"] = True
     return jresp({"ok": True, "deterministic": det, "agent_run": local})
+
+async def start_fin_agent(kind, name, text, tools, request, meta):
+    cfg = ENG.creao_config()
+    if not cfg["cli"] or not cfg["base"]: return None, "CREAO key not available"
+    local = "AP-%s" % secrets.token_hex(4); token = secrets.token_urlsafe(24)
+    ENG.tokens[token] = {"incident_id": None, "task": kind, "run_ref": local, "expires": time.time() + 3600, "allowed": tools}; ENG.db.set("tool_tokens", ENG.tokens)
+    request = {"gridpilot_api": cfg["base"] + "/tools/creao", "tool_token": token, **request}
+    ENG.db.ex("insert into agent_runs values(?,?,?,?,?,?,?,?,?)", (local, "creao-cli", None, None, "specialist:" + kind, "creating_agent", time.time(), None,
+              E.jd({"specialist": {"kind": kind, "name": name, "mission": meta.get("mission", kind), "trigger": meta.get("trigger", "operator")}, "requested_by": "operator", **meta, "request": {**request, "tool_token": "[redacted]"}})))
+    ENG.pending_inputs[local] = request
+    key, aid = await ENG.ensure_agent(kind, name, text)
+    d = json.loads(ENG.db.one("select data from agent_runs where id=?", (local,))["data"]); d["agent_key"] = key
+    ENG.db.ex("update agent_runs set data=?, status=? where id=?", (E.jd(d), "awaiting_agent" if not aid else "starting", local))
+    if aid: await ENG._start_cli_run(local, aid)
+    DIRTY["v"] = True
+    return local, None
+
+@routes.post("/api/finance/invoices/{id}/ask")
+async def api_inv_ask(req):
+    uid = owner_only(req); b = await req.json(); iid = req.match_info["id"]; q = str(b.get("question") or "").strip()[:600]
+    if not ENG.db.one("select id from ap_invoices where id=?", (iid,)): return jresp({"ok": False, "message": "unknown invoice"}, 404)
+    if len(q) < 4: return jresp({"ok": False, "message": "ask a question"}, 400)
+    ENG.db.ex("insert into ap_decisions(invoice_id,ts,actor,decision,amount,reason,evidence,kind) values(?,?,?,?,?,?,?,?)", (iid, time.time(), "operator:" + uid[:8], "question", 0, q, "[]", "question"))
+    local, err = await start_fin_agent("finance_explainer", "GRIDPILOT Finance Explainer", EXPLAIN_TEXT, EXPLAIN_TOOLS,
+                                       {"task": "explain_decision", "invoice_id": iid, "question": q}, {"invoice_id": iid, "question": q, "mission": "explain a finance decision", "trigger": "question on " + iid})
+    if not local: return jresp({"ok": False, "message": err}, 409)
+    return jresp({"ok": True, "agent_run": local, "message": "Question sent to the CREAO Finance Explainer"})
+
+@routes.post("/api/finance/invoices")
+async def api_inv_new(req):
+    """Reviewer scenario: submit any invoice; it goes through the same autonomous pass as the seeded inbox."""
+    owner_only(req); b = await req.json()
+    try: iid = DESK.submit_invoice(b)
+    except ValueError as ex: return jresp({"ok": False, "message": str(ex)}, 400)
+    res = dict(DESK.autonomous_pass("agent:ap")).get(iid)
+    a = DESK.analyze(iid); DIRTY["v"] = True
+    return jresp({"ok": True, "invoice_id": iid, "status": res, "decision": a["decision"], "amount": a["amount"], "reason": a["reason"], "message": "%s ingested · %s" % (iid, (res or "").replace("_", " "))})
 
 @routes.get("/api/finance/summary")
 async def api_fin(req): owner_only(req); return jresp(finance_summary())
@@ -455,6 +493,22 @@ FIN_TEXT = ("Create a reusable personal agent named \"GRIDPILOT AP Analyst\" wit
     "polite email to the vendor citing the contract clause or meter. Treat any change of bank details as possible fraud: recommend hold and verification by "
     "calling the number on file. Finish with submit_report summarizing what you recommended and anything the controller must decide.\n\n"
     "Final answer: one JSON object {reviewed: n, recommendations: [{invoice_id, decision, amount}], escalations: [..], notes}.")
+
+EXPLAIN_TOOLS = ["fin_list_invoices", "fin_analyze_invoice", "fin_vendor_history", "fin_policy", "fin_decision_log", "submit_report"]
+EXPLAIN_TEXT = ("Create a reusable personal agent named \"GRIDPILOT Finance Explainer\" with exactly ONE input field named `request` (long text).\n\n"
+    "Role: you answer questions from the controller, an auditor or a reviewer about decisions the Atlas Compute finance desk made on vendor invoices "
+    "(by the deterministic matcher, the AP Analyst agent, or a human controller). You defend a decision when the evidence supports it, and you say plainly "
+    "when it does not. You cannot change anything.\n\n"
+    "On every run: parse `request` as JSON (gridpilot_api, tool_token, invoice_id, question). Tools are HTTPS endpoints: POST JSON to {gridpilot_api}/{tool} "
+    "with headers `X-GridPilot-Tool-Token: {tool_token}` and `Content-Type: application/json`. Allowed tools: fin_analyze_invoice {invoice_id} (contract x meter x "
+    "invoice match with evidence ids), fin_decision_log {invoice_id} (every decision on that invoice: who, when, why, evidence), fin_vendor_history {vendor} "
+    "(past invoices, disputes, credit memos, contract), fin_policy {} (limits, segregation of duties, rules), fin_list_invoices {}, submit_report "
+    "{kind: decision_explanation, invoice_id, text}. Make tool calls with Python requests (json=...), not curl in a shell, so dollar amounts like $25 are not mangled. Never invent a tool result.\n\n"
+    "Always call fin_analyze_invoice and fin_decision_log for the invoice, plus fin_vendor_history or fin_policy when relevant. Then call submit_report once "
+    "with kind decision_explanation, the invoice_id and your answer: 3 to 8 sentences in plain English that answer the question directly, cite the exact "
+    "sources (contract id, meter id, credit memo id, vendor master field, policy rule, person and date of each decision), say which source was trusted over which "
+    "and why, and name what would change the decision. If the record does not support the decision, say so.\n\n"
+    "Final answer: one JSON object {invoice_id, answer, sources: [ids], decision_supported: true|false}.")
 
 # ---------------------------------------------------------------- CREAO tools
 MANIFEST = {
@@ -503,6 +557,12 @@ async def fin_tool(tool, args, actor):
         return {"vendor": FD.VENDORS.get(v), "invoices": ENG.db.all("select id, number, date, period, amount, status from ap_invoices where vendor=? order by date", (v,)),
                 "decisions": ENG.db.all("select invoice_id, actor, decision, amount, reason, ts from ap_decisions where invoice_id in (select id from ap_invoices where vendor=?) order by id", (v,)),
                 "credit_memos": ENG.db.all("select * from credit_memos where vendor=?", (v,)), "contract": {k: c for k, c in FD.CONTRACTS.items() if c["vendor"] == v}}
+    if tool == "fin_decision_log":
+        iid = args.get("invoice_id"); r = ENG.db.one("select id, vendor, number, date, amount, status, data from ap_invoices where id=?", (iid,))
+        if not r: return {"error": "unknown invoice"}
+        return {"invoice": dict(r, data=json.loads(r["data"])), "decisions": [dict(d, evidence=json.loads(d["evidence"] or "[]"), when=time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(d["ts"])))
+                for d in ENG.db.all("select actor, decision, amount, reason, evidence, kind, ts from ap_decisions where invoice_id=? order by id", (iid,))],
+                "journal": [j for j in DESK.snapshot()["journal"] if iid in (j.get("source") or "") or any(iid in json.dumps(l) for l in j.get("lines", []))][:10]}
     if tool == "fin_policy": return {"policy": FD.POLICY, "people": FD.PEOPLE, "rules": ["Agent may approve only clean matches up to $250.", "Controller approves everything else.", "The requester of a purchase cannot approve its invoice.", "Bank detail changes require a callback to the number on file before any payment.", "Price variances are disputed at any amount; quantity variances below $25 are approved and logged."]}
     if tool == "fin_recommend":
         iid = args.get("invoice_id"); a = DESK.analyze(iid)
@@ -519,7 +579,10 @@ async def fin_tool(tool, args, actor):
 async def tool_dispatch(tool, args, iid, actor, channel):
     if tool.startswith("fin_") or (iid is None and tool == "submit_report"):
         if tool == "submit_report":
-            ENG.event(None, "agent_report", actor, {"kind": args.get("kind"), "text": str(args.get("text", ""))[:4000]}); return {"ok": True}
+            if args.get("kind") == "decision_explanation" and args.get("invoice_id"):
+                ENG.db.ex("insert into ap_decisions(invoice_id,ts,actor,decision,amount,reason,evidence,kind) values(?,?,?,?,?,?,?,?)", (args["invoice_id"], time.time(), actor, "explanation", 0, str(args.get("text", ""))[:4000], E.jd({"question": args.get("question")}), "explanation"))
+                DIRTY["v"] = True
+            ENG.event(None, "agent_report", actor, {"kind": args.get("kind"), "invoice_id": args.get("invoice_id"), "text": str(args.get("text", ""))[:4000]}); return {"ok": True}
         return await fin_tool(tool, args, actor)
     inc = ENG.incident(iid); snap = SIM.snapshot(field=False)
     if tool == "manifest": return MANIFEST

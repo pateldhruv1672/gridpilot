@@ -435,8 +435,18 @@ class Engine:
         if obj.get("finding") and inc:
             inc.setdefault("reports", []).append({"kind": "specialist:" + r["task"].split(":", 1)[1], "text": str(obj.get("finding"))[:4000], "by": "creao:" + (r["provider_run_id"] or r["id"]), "ts": now()})
             self.save_incident(inc)
+        actor = "creao:" + (r["provider_run_id"] or r["id"]); extra = {}
+        if r["task"] == "specialist:finance_explainer" and st == "completed" and data.get("invoice_id"):
+            got = self.db.one("select id from ap_decisions where invoice_id=? and kind='explanation' and actor=?", (data["invoice_id"], actor))
+            if not got:
+                ans = (obj.get("answer") if isinstance(obj, dict) else None) or (data.get("result_text") or "")[:4000]
+                if ans: self.db.ex("insert into ap_decisions(invoice_id,ts,actor,decision,amount,reason,evidence,kind) values(?,?,?,?,?,?,?,?)", (data["invoice_id"], now(), actor, "explanation", 0, str(ans)[:4000], jd({"question": data.get("question")}), "explanation"))
+            extra["explained"] = data["invoice_id"]
+        if r["task"] == "specialist:ap_analyst":
+            n = self.db.one("select count(*) n from ap_decisions where actor=? and kind='agent_recommendation'", (actor,))["n"]
+            extra["recommendations"] = n
         self.db.ex("update agent_runs set data=? where id=?", (jd(data), r["id"]))
-        self.event(r["incident_id"], "specialist_completed", "creao:" + (r["provider_run_id"] or r["id"]), {"run_ref": r["id"], "status": st, "has_recommendation": bool(data.get("evaluation"))})
+        self.event(r["incident_id"], "specialist_completed", actor, {"run_ref": r["id"], "status": st, "has_recommendation": bool(data.get("evaluation")) or bool(extra.get("recommendations")) or bool(extra.get("explained")), **extra})
         await self._follow_up(r, data)
 
     async def _follow_up(self, r, data):

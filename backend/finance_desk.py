@@ -193,6 +193,31 @@ class Desk:
         return {"invoice_id": r["id"], "decision": decision, "amount": round(amount, 2), "reason": reason, "checks": checks, "credits": credits or [], "approver_required": need,
                 "segregation": "requested by %s; cannot be approved by the requester" % PEOPLE.get(json.loads(r["data"]).get("requested_by"), "n/a") if json.loads(r["data"]).get("requested_by") else None}
 
+    def submit_invoice(self, b):
+        v = (b.get("vendor") or "").strip().upper()[:12]
+        lines = []
+        for l in (b.get("lines") or [])[:10]:
+            q, rt = float(l.get("qty") or 0), float(l.get("rate") or 0)
+            if q <= 0 or rt <= 0: raise ValueError("each line needs a positive qty and rate")
+            lines.append({"sku": str(l.get("sku") or "SERVICE")[:40], "qty": q, "rate": rt, "usd": round(q * rt, 2)})
+        if not v or not lines: raise ValueError("vendor and at least one line are required")
+        num = (b.get("number") or "").strip()[:24] or "%s-%s" % (v, secrets.token_hex(2).upper())
+        iid = num if num.startswith(v) else v + "-" + num
+        if self.db.one("select id from ap_invoices where id=?", (iid,)): raise ValueError(iid + " already exists (a second copy would be a duplicate)")
+        date = b.get("date") or today(); period = b.get("period") or date[:7]
+        master = VENDORS.get(v)
+        d = {"lines": lines, "remit_to": (b.get("remit_to") or "").strip() or (master or {}).get("remit", "unknown"),
+             "from_email": (b.get("from_email") or "").strip() or ("billing@" + master["domain"] if master else "ar@unknown.example"), "submitted_by": "reviewer"}
+        for k in ("incident", "po", "note", "requested_by"):
+            if b.get(k): d[k] = str(b[k]).strip()[:400]
+        if not master: d["vendor_name"] = (b.get("vendor_name") or v)[:60]
+        amt = round(sum(l["usd"] for l in lines), 2)
+        due = (dt.date.fromisoformat(date) + dt.timedelta(days=(master or {}).get("terms_days", 30))).isoformat()
+        self.db.ex("insert into ap_invoices values(?,?,?,?,?,?,?,?,?,?)", (iid, v, num, date, due, period, amt, "received", now(), json.dumps(d)))
+        self.db.ex("insert into ap_decisions(invoice_id,ts,actor,decision,amount,reason,evidence,kind) values(?,?,?,?,?,?,?,?)", (iid, now(), "reviewer", "submitted", amt, "invoice submitted from the console as a test scenario", "[]", "intake"))
+        self.event(None, "invoice_submitted", "reviewer", {"invoice_id": iid, "vendor": v, "amount": amt})
+        return iid
+
     # ------------------------------------------------------------ autonomous AP pass (agent seat, within its limits)
     def autonomous_pass(self, actor="agent:ap"):
         out = []
