@@ -492,6 +492,9 @@ class Engine:
         out = []; cfg = self.sim.config
         if not isinstance(actions, list): raise ValueError("actions must be a list")
         for a in actions:
+            if isinstance(a, dict) and "type" not in a:
+                alias = a.get("action") or a.get("kind")
+                if alias: a = {**{k: v for k, v in a.items() if k not in ("action", "kind")}, "type": alias}
             if not isinstance(a, dict) or "type" not in a: raise ValueError("each action needs a type")
             t = a["type"]
             if t == "migrate_workload":

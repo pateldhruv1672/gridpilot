@@ -6,6 +6,8 @@
 - **Seats:** accounts-payable analyst + cost controller for a GPU cloud, signing off with the human controller.
 - **The moment:** a look-alike "we changed banks" invoice, a duplicate bill, a $0.25/GPU-hour overcharge worth only $3 (below materiality, still disputed because it is a price variance), and a credit the vendor has owed since March: all caught, explained with sources, and held for the right person.
 - **Proof:** 9/9 vs answer key, 5/5 planted errors, 0 false flags (`tests/test_finance_desk.py`, 12 checks). CREAO AP Analyst agreed with the deterministic matcher 6/6.
+- **Defends its decisions:** "Ask why" on any invoice starts a CREAO Finance Explainer agent that reads the contract, meter, vendor history and decision log, then answers with cited sources (for example why a $3 price variance is disputed below the $25 materiality line) and says what would change the call.
+- **Try your own scenario:** "+ Test invoice" submits any invoice (bank change, price creep, over-billed usage, unknown vendor or your own) and it goes through the same autonomous pass and controls live.
 - **What's real:** ledger, matching, controls, payment runs, audit trail, CREAO runs. **Simulated:** vendors, invoices, bank feed, history.
 
 ## Cartesia

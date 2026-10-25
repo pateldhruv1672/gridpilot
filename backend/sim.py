@@ -276,11 +276,14 @@ class Sim:
                 texh = self.inlet[idx] + P[idx] / (RHO_CP * Q[idx]) if hasattr(self, "inlet") else np.mean([T[j, i] for j, i in fout])
                 g = math.exp(-c / 1.5)
                 for j, i in fin:
-                    T[j, i] += 1.6 * self.deficit[k] * g * (texh - T[j, i]) * dt
+                    T[j, i] += min(1.0, 1.6 * self.deficit[k] * g * dt) * (texh - T[j, i])
         # turbulent diffusion
-        lap = (np.roll(T, 1, 0) + np.roll(T, -1, 0) + np.roll(T, 1, 1) + np.roll(T, -1, 1) - 4 * T)
-        lap[0, :] = lap[-1, :] = 0; lap[:, 0] = lap[:, -1] = 0
-        T += 0.03 * dt / (H * H) * lap
+        # explicit diffusion is stable only for k <= 0.25 on a 2D grid; sub-cycle so coarse forecast steps (dt=1 s) stay stable
+        k = 0.03 * dt / (H * H); nd = max(1, int(math.ceil(k / 0.2)))
+        for _ in range(nd):
+            lap = (np.roll(T, 1, 0) + np.roll(T, -1, 0) + np.roll(T, 1, 1) + np.roll(T, -1, 1) - 4 * T)
+            lap[0, :] = lap[-1, :] = 0; lap[:, 0] = lap[:, -1] = 0
+            T += (k / nd) * lap
         self.T = T
         # rack-level metrics
         inlet = np.zeros(64); exh = np.zeros(64)

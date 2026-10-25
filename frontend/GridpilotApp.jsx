@@ -548,7 +548,7 @@ function ControlRoom({ g, setModal, toast, narrow }) {
   const lat = snap ? snap.latency : {};
   return <div className={'flex flex-col min-h-0 flex-1' + (narrow ? ' overflow-auto' : '')}>
     <div className={narrow ? 'flex flex-col' : 'flex flex-1 min-h-0'}>
-      <div className="relative min-w-0" style={narrow ? { height: 460, flexShrink: 0 } : { flex: '0 0 65%' }}>
+      <div className="relative min-w-0" style={narrow ? { height: 460, flexShrink: 0 } : { flex: '1 1 auto' }}>
         <DataCenterScene snapRef={g.snapRef} opts={opts} selected={sel} onSelect={onSelect} camCmd={cmd} />
         <div className="absolute left-3 top-3 flex flex-col gap-2 pointer-events-auto" style={{ maxWidth: narrow ? 'calc(100% - 24px)' : undefined }}>
           <div className="flex rounded-full p-0.5" style={{ background: 'rgba(16,24,38,.85)', border: '1px solid ' + C.line2 }}>
@@ -561,7 +561,7 @@ function ControlRoom({ g, setModal, toast, narrow }) {
             <button onClick={() => set('labels', !opts.labels)} style={{ color: opts.labels ? C.cyan : C.mute }}>labels</button>
           </div>
         </div>
-        <div className="absolute right-3 flex gap-1.5" style={{ top: narrow ? 104 : 12, background: 'rgba(16,24,38,.8)', padding: 4, borderRadius: 8, border: '1px solid ' + C.line }}>
+        <div className="absolute right-3 flex gap-1.5" style={{ top: 104, background: 'rgba(16,24,38,.8)', padding: 4, borderRadius: 8, border: '1px solid ' + C.line }}>
           {camBtn('reset', 'Reset')}{camBtn('iso', '3D iso')}{camBtn('top', '2D top')}{camBtn('focus', 'Focus')}
         </div>
         <div className="absolute left-3 bottom-3 px-3 py-2 rounded-lg" style={{ background: 'rgba(16,24,38,.82)', border: '1px solid ' + C.line, font: '10px ' + MONO, color: C.mute }}>
@@ -576,7 +576,7 @@ function ControlRoom({ g, setModal, toast, narrow }) {
           <div className="mt-2" style={{ font: '10px/1.5 ' + MONO, color: C.mute }}>{selR.workloads.map(w => <div key={w} className="flex justify-between"><span>{w}</span><span style={{ color: lat[w] && lat[w].breach ? C.red : C.dim }}>{lat[w] ? lat[w].p95_ms + '/' + lat[w].limit_ms + 'ms' : ''}</span></div>)}</div>
         </div>}
       </div>
-      <div className="min-w-0 overflow-auto" style={narrow ? { borderTop: '1px solid ' + C.line, background: C.p1 } : { flex: '0 0 35%', borderLeft: '1px solid ' + C.line, background: C.p1 }}>
+      <div className="min-w-0 overflow-auto" style={narrow ? { borderTop: '1px solid ' + C.line, background: C.p1 } : { flex: '0 0 max(360px, 35%)', borderLeft: '1px solid ' + C.line, background: C.p1 }}>
         <IncidentPanel g={g} setModal={setModal} toast={toast} />
       </div>
     </div>
@@ -904,9 +904,9 @@ function UserDiv() {
       <Metric label="PUE" value={tot ? tot.pue.toFixed(3) : '—'} unit="" sub={snap ? 'C02 effectiveness ' + Math.round(snap.cooling[1].effectiveness * 100) + '%' : ''} tone={tot && tot.pue > 1.41 ? C.amber : undefined} />
       <Metric label="SLA risk · exposure" value={breaches} unit={breaches === 1 ? 'breach' : 'breaches'} sub={exposure ? fmt$(exposure) + '/min if sustained (conditional)' : 'no conditional exposure'} tone={breaches ? C.red : C.mint} />
     </div>
-    {tab === 'control' && <ControlRoom g={g} setModal={setModal} toast={toast} narrow={narrow} />}
-    {tab === 'finops' && <FinanceDesk g={g} toast={toast} narrow={narrow} />}
-    {tab === 'agents' && <AgentOps g={g} narrow={narrow} />}
+    {tab === 'control' && <ControlRoom g={g} setModal={setModal} toast={toast} narrow={W < 900} />}
+    {tab === 'finops' && <FinanceDesk g={g} toast={toast} narrow={W < 860} />}
+    {tab === 'agents' && <AgentOps g={g} narrow={W < 980} />}
     {tab === 'settings' && <Settings g={g} toast={toast} />}
     <CallOverlay g={g} />
     {modal && modal.kind === 'diff' && <Modal wide title={'Configuration changes' + (plan ? ' · ' + plan.plan_id + ' v' + plan.version : '')} onClose={() => setModal(null)}>
