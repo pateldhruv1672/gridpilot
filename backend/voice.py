@@ -88,15 +88,22 @@ def ensure_setup(engine):
     db.set("cartesia_setup_base", base)
     return {"agent_id": agent_id, "from_number_id": num, "tool_ids": tool_ids}
 
+_CALLS_BY_PHONE = {}
+
 async def start_call(engine, inc_id, actor):
     db = engine.db
-    op = db.get("operator")
+    # call the person who is driving this session (last user who registered a phone and ran a scenario), else the default on-call
+    oc = db.get("oncall_uid"); op = (db.get("operators") or {}).get(oc) if oc else None
+    op = op or db.get("operator")
     cid = "CALL-%s" % secrets.token_hex(3)
     def fail(msg):
         db.ex("insert into calls values(?,?,?,?,?)", (cid, inc_id, time.time(), "failed", json.dumps({"error": msg, "actor": actor})))
         engine.event(inc_id, "call_not_placed", actor, {"call_id": cid, "reason": msg}); return None
     if not op or not op.get("phone") or not op.get("consent"):
         return fail("no consenting operator configured")
+    recent = [t for t in _CALLS_BY_PHONE.get(op["phone"], []) if t > time.time() - 3600]
+    if len(recent) >= 4: return fail("call limit reached for this number (4 per hour)")
+    _CALLS_BY_PHONE[op["phone"]] = recent + [time.time()]
     try:
         if db.get("cartesia_setup_base") != engine.public_base or not db.get("cartesia_agent_id"):
             await asyncio.to_thread(ensure_setup, engine)

@@ -959,9 +959,13 @@ function useGridpilot() {
     const tok = await FS.auth.currentUser.getIdToken();
     const r = await fetch(urlRef.current + path, { method, headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
     const j = await r.json().catch(() => ({}));
+    if (r.status === 428) { setNeedPhone(true); throw new Error(j.message || 'Add a phone number first'); }
     if (!r.ok) throw new Error(j.message || j.error || ('HTTP ' + r.status));
     return j;
   }, []);
+  const [me, setMe] = React.useState(null); const [needPhone, setNeedPhone] = React.useState(false);
+  const loadMe = React.useCallback(async () => { try { const m = await api('/api/me'); setMe(m); if (m.registered) setNeedPhone(false); } catch (e) { } }, [api]);
+  React.useEffect(() => { if (url) loadMe(); }, [url, loadMe]);
   React.useEffect(() => {
     if (!url || !wsUrl) return;
     let ws = null, dead = false, retry = 0, timer = null;
@@ -981,7 +985,7 @@ function useGridpilot() {
   }, [url, wsUrl, api]);
   const refresh = React.useCallback(async () => { try { const s = await api('/api/state'); if (s && s.desk) setState(s); } catch (e) { } }, [api]);
   const merged = state ? { ...state, incident: mergeIncident(state.incident, stdb.dataRef.current) } : state;
-  return { url, error, snapRef, twinRef, gpusRef, tickN, state: merged, conn, api, stdb, refresh };
+  return { url, error, snapRef, twinRef, gpusRef, tickN, state: merged, conn, api, stdb, refresh, me, loadMe, needPhone, setNeedPhone };
 }
 
 
@@ -1532,7 +1536,7 @@ function OrchMap({ g }) {
 function GhostTab({ g, toast, narrow }) {
   const st = g.state; const gv = (st && st.ghost) || {}; const runs = gv.runs || []; const latest = runs[0];
   const [run, setRun] = React.useState(null); const [busy, setBusy] = React.useState(false);
-  const owner = userId === ownerId;
+  const realOwner = userId === ownerId; const owner = true;
   const go = async () => {
     setRun({ status: 'reading GRIDPILOT digest', events: 0 });
     try {
@@ -1558,7 +1562,7 @@ function GhostTab({ g, toast, narrow }) {
         <div style={{ font: '600 14px ' + SANS, color: C.text, marginTop: 3 }}>Watches every loop, then designs orchestration v2: new agents, schedulers and detectors</div>
         <div style={{ font: '11px/1.5 ' + SANS, color: C.mute, marginTop: 2 }}>It reads the live digest (agent runs, tool errors, incidents, work orders, per-GPU telemetry, finance, energy, security), proposes a blueprint, and GRIDPILOT dispatches only what you approve. Runs on demand and hourly from a Mana scheduler.</div></div>
       <div className="flex flex-col items-end gap-1">
-        {owner && <Btn tone="primary" disabled={!!run} onClick={go}>{run ? 'Ghost running…' : 'Run Ghost Architect now'}</Btn>}
+        {realOwner && <Btn tone="primary" disabled={!!run} onClick={go}>{run ? 'Ghost running…' : 'Run Ghost Architect now'}</Btn>}
         {run && <div className="gp-dot-live" style={{ font: '10px ' + MONO, color: '#b49cff' }}>{run.status}{run.events ? ' · ' + run.events + ' events' : ''}{run.last ? ' · ' + run.last : ''}</div>}
         <div style={{ font: '9.5px ' + MONO, color: C.dim }}>v2 budget {gv.budget ? gv.budget.v2_runs_last_hour + '/' + gv.budget.max : '—'} agent runs per hour</div>
       </div>
@@ -1654,7 +1658,7 @@ const LIVE_CSS = '.gp-root *{scrollbar-color:#24334a transparent;scrollbar-width
 const PST = { waiting: C.dim, working: C.cyan, done: C.mint, failed: C.red, 'not needed': '#6f8299' };
 function ScenariosTab({ g, toast, narrow, openTrace }) {
   const [d, setD] = React.useState(null); const [busy, setBusy] = React.useState(null); const [reset, setReset] = React.useState(true);
-  const owner = userId === ownerId;
+  const owner = true;   // any signed-in user may run scenarios (backend asks for a phone first)
   React.useEffect(() => { let dead = false; const load = () => g.api('/api/scenarios').then(r => { if (!dead) setD(r); }).catch(() => { }); load(); const t = setInterval(load, 2500); return () => { dead = true; clearInterval(t); }; }, [g.url]);
   const run = async (id) => { setBusy(id); try { const r = await g.api('/api/scenarios/' + id + '/run', 'POST', { reset }); toast(r.message, 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(null); };
   const stop = async () => { try { const r = await g.api('/api/scenarios/stop', 'POST', {}); toast(r.message, 'ok'); } catch (e) { toast(e.message, 'err'); } };
@@ -1722,9 +1726,9 @@ function Countdown({ until }) {
   return left > 0 ? <span style={{ color: left < 120 ? C.amber : C.mint }}>{Math.floor(left / 60)}:{String(Math.floor(left % 60)).padStart(2, '0')} left</span> : <span style={{ color: C.red }}>expired {Math.round(-left / 60)} min ago</span>;
 }
 function ApprovalCenter({ g, toast, data, setTab, onClose }) {
-  const [busy, setBusy] = React.useState(null); const [vc, setVc] = React.useState(null); const owner = userId === ownerId;
+  const [busy, setBusy] = React.useState(null); const [vc, setVc] = React.useState(null); const realOwner = userId === ownerId; const owner = true;
   const loadVc = () => g.api('/api/voice/check').then(setVc).catch(e => setVc({ error: e.message }));
-  React.useEffect(() => { if (owner) loadVc(); }, []);
+  React.useEffect(() => { if (realOwner) loadVc(); }, []);
   const run = async (key, fn) => { setBusy(key); try { const r = await fn(); toast((r && r.message) || 'done', r && r.ok === false ? 'err' : 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(null); };
   const items = (data && data.items) || [];
   const LC = { Remediation: C.red, Reliability: C.mint, 'Ghost v2': '#b49cff', Finance: C.amber };
@@ -1755,7 +1759,7 @@ function ApprovalCenter({ g, toast, data, setTab, onClose }) {
           {it.kind === 'invoice' && <Btn small onClick={() => { setTab('finops'); onClose(); }}>Open in Finance desk</Btn>}
         </div>}
       </div>)}</div></div>
-    {owner && <div><div className="flex items-center gap-2"><Label color="#b49cff">Cartesia voice approvals · readiness</Label><span className="ml-auto flex gap-2"><Btn small onClick={loadVc}>Re-run checks</Btn><Btn small disabled={!!busy} onClick={() => run('vs', async () => { const r = await g.api('/api/voice/setup', 'POST', {}); loadVc(); return r; })}>Re-register voice agent</Btn></span></div>
+    {realOwner && <div><div className="flex items-center gap-2"><Label color="#b49cff">Cartesia voice approvals · readiness</Label><span className="ml-auto flex gap-2"><Btn small onClick={loadVc}>Re-run checks</Btn><Btn small disabled={!!busy} onClick={() => run('vs', async () => { const r = await g.api('/api/voice/setup', 'POST', {}); loadVc(); return r; })}>Re-register voice agent</Btn></span></div>
       {!vc ? <div style={{ font: '11px ' + SANS, color: C.mute, marginTop: 6 }}>Checking Cartesia…</div> : vc.error ? <div style={{ color: C.red, font: '11px ' + SANS }}>{vc.error}</div> : <>
         <div className="grid gap-1.5 mt-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>{vc.checks.map(x => <div key={x.name} className="flex gap-2 items-start px-2.5 py-1.5 rounded" style={{ background: C.p1, border: '1px solid ' + (x.ok ? 'rgba(79,224,165,.25)' : 'rgba(255,89,110,.35)') }}><span style={{ color: x.ok ? C.mint : C.red, font: '12px ' + MONO }}>{x.ok ? '✓' : '✗'}</span><div className="min-w-0"><div style={{ font: '600 11px ' + SANS, color: C.text }}>{x.name}</div><div className="truncate" style={{ font: '10px ' + MONO, color: C.mute }} title={x.detail}>{x.detail}</div></div></div>)}</div>
         <div className="mt-2 p-2.5 rounded" style={{ background: vc.ready ? 'rgba(79,224,165,.06)' : 'rgba(255,187,85,.06)', border: '1px solid ' + (vc.ready ? 'rgba(79,224,165,.3)' : 'rgba(255,187,85,.35)'), font: '11.5px/1.55 ' + SANS, color: C.text }}><b>{vc.ready ? 'Ready to call. ' : 'Not ready. '}</b>{vc.how_to_test}</div>
@@ -1812,7 +1816,45 @@ function LoadDistribution({ g }) {
   </Panel>;
 }
 
+// Who the Cartesia voice agent phones for approvals. Every user registers before operating; the default is the project's on-call number.
+function PhoneCard({ g, toast, onDone, onClose }) {
+  const me = g.me || {}; const dflt = me.default_operator || {};
+  const [mode, setMode] = React.useState('default'); const [name, setName] = React.useState(''); const [phone, setPhone] = React.useState('');
+  const [consent, setConsent] = React.useState(false); const [busy, setBusy] = React.useState(false); const [err, setErr] = React.useState('');
+  const submit = async () => {
+    setBusy(true); setErr('');
+    try { const r = await g.api('/api/me/phone', 'POST', mode === 'default' ? { use_default: true } : { name, phone, consent }); await g.loadMe(); toast && toast(r.message, 'ok'); onDone && onDone(); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const opt = (k, title, sub) => <button onClick={() => setMode(k)} className="w-full text-left rounded-lg px-3 py-2 flex gap-2.5 items-start" style={{ background: mode === k ? 'rgba(67,217,245,.07)' : 'transparent', border: '1px solid ' + (mode === k ? 'rgba(67,217,245,.45)' : C.line) }}>
+    <span style={{ width: 12, height: 12, borderRadius: 12, marginTop: 2, flexShrink: 0, border: '1.5px solid ' + (mode === k ? C.cyan : C.dim), boxShadow: mode === k ? 'inset 0 0 0 2.5px ' + C.p2 + ', inset 0 0 0 6px ' + C.cyan : 'none' }} />
+    <span><span style={{ display: 'block', font: '600 12px ' + SANS, color: C.text }}>{title}</span><span style={{ display: 'block', font: '10.5px ' + MONO, color: C.mute, marginTop: 1 }}>{sub}</span></span></button>;
+  const inp = { width: '100%', background: C.bg, border: '1px solid ' + C.line2, borderRadius: 8, padding: '7px 10px', color: C.text, font: '12px ' + MONO, outline: 'none' };
+  const ok = mode === 'default' || (phone.replace(/\D/g, '').length >= 10 && consent);
+  return <div onPointerDown={e => e.stopPropagation()} onWheel={e => e.stopPropagation()} className="rounded-xl p-4 flex flex-col gap-2.5" style={{ width: 320, background: 'rgba(16,24,38,.97)', border: '1px solid rgba(67,217,245,.4)', boxShadow: '0 18px 50px rgba(0,0,0,.5)' }}>
+    <div className="relative">{onClose && <button onClick={onClose} aria-label="Close" className="absolute" style={{ right: -4, top: -6, color: C.mute, font: '500 17px ' + SANS }}>×</button>}<Label color={C.cyan}>{g.me && g.me.registered ? 'On-call phone' : 'Before you operate'}</Label><div style={{ font: '600 14px ' + SANS, color: C.text, marginTop: 4 }}>Who should the voice agent call?</div>
+      <div style={{ font: '11.5px/1.5 ' + SANS, color: C.mute, marginTop: 4 }}>When a plan needs approval, GRIDPILOT's Cartesia agent phones the on-call engineer, who can approve by voice. Calls for the scenarios you run go to this number.</div></div>
+    {opt('default', 'Keep the default on-call', (dflt.name || 'Dhruv') + ' · ' + (dflt.phone_masked || '+1 •••8678'))}
+    {opt('mine', 'Call me', 'your own phone, your approvals')}
+    {mode === 'mine' && <div className="flex flex-col gap-2 pl-1">
+      <input value={name} onChange={e => setName(e.target.value)} placeholder="Your name" style={inp} />
+      <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+1 510 555 0100" inputMode="tel" style={inp} onKeyDown={e => { if (e.key === 'Enter' && ok) submit(); }} />
+      <label className="flex gap-2 items-start" style={{ font: '10.5px/1.45 ' + SANS, color: C.mute }}><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} style={{ accentColor: C.cyan, marginTop: 2 }} />I agree to receive automated voice calls from GRIDPILOT at this number (max 4 per hour).</label></div>}
+    {err && <div style={{ font: '11px ' + SANS, color: C.red }}>{err}</div>}
+    <Btn tone="primary" disabled={busy || !ok} onClick={submit}>{busy ? 'Saving…' : 'Continue'}</Btn>
+    <div style={{ font: '9.5px ' + MONO, color: C.dim }}>Stored only on the GRIDPILOT backend, shown masked. You can change it any time.</div>
+  </div>;
+}
+function OnCallChip({ g, onChange }) {
+  const o = g.me && g.me.operator; if (!o) return null;
+  return <button onClick={onChange} onPointerDown={e => e.stopPropagation()} className="rounded-full flex items-center gap-2" style={{ background: 'rgba(16,24,38,.88)', border: '1px solid ' + C.line2, padding: '5px 11px', font: '10.5px ' + MONO, color: C.mute }} title="Change who the voice agent calls">
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={C.mint} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z" /></svg>
+    <span>calls go to <b style={{ color: C.text, fontWeight: 600 }}>{o.name}</b> {o.phone_masked}{o.default ? ' (default)' : ''}</span><span style={{ color: C.cyan }}>change</span></button>;
+}
+
 function ControlRoom({ g, setModal, toast, narrow }) {
+  const [phoneOpen, setPhoneOpen] = React.useState(false);
   const [opts, setOpts] = React.useState({ mode: 'combined', density: 0.7, intensity: 1, paused: false, labels: false });
   const [sel, setSel] = React.useState(null); const [cmd, setCmd] = React.useState({ n: 0 }); const [strip, setStrip] = React.useState(false); const [focus, setFocus] = React.useState(false);
   const snap = g.snapRef.current; const selR = snap && sel != null ? snap.racks[sel] : null;
@@ -1826,6 +1868,7 @@ function ControlRoom({ g, setModal, toast, narrow }) {
       <div className="relative min-w-0" style={narrow ? { height: focus ? 'calc(var(--mana-app-height, 82vh) - 60px)' : 600, flexShrink: 0 } : { flex: '1 1 auto' }}>
         <DataCenterScene snapRef={g.snapRef} gpusRef={g.gpusRef} twinRef={g.twinRef} opts={opts} selected={sel} onSelect={onSelect} camCmd={cmd} impactRef={impactRef} />
         {imp && !selR && <div className="absolute left-3" style={{ bottom: 78 }}><ImpactHud imp={imp} /></div>}
+        {g.me && <div className="absolute right-3 top-3 z-20 flex flex-col items-end gap-2">{g.me.registered && !phoneOpen ? <OnCallChip g={g} onChange={() => setPhoneOpen(true)} /> : <PhoneCard g={g} toast={toast} onDone={() => setPhoneOpen(false)} onClose={g.me.registered ? () => setPhoneOpen(false) : null} />}</div>}
         <div className="absolute left-3 top-3 flex flex-col gap-2 pointer-events-auto" style={{ maxWidth: narrow ? 'calc(100% - 24px)' : undefined }}>
           <div className="flex rounded-full p-0.5" style={{ background: 'rgba(16,24,38,.85)', border: '1px solid ' + C.line2 }}>
             {['thermal', 'airflow', 'power', 'workload', 'combined'].map(m => <button key={m} onClick={() => set('mode', m)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '5px 11px', letterSpacing: '.02em', color: opts.mode === m ? '#04121a' : C.mute, background: opts.mode === m ? C.cyan : 'transparent' }}>{m[0].toUpperCase() + m.slice(1)}</button>)}
@@ -2187,7 +2230,7 @@ const LOOPS_INFO = [
 
 const SSC = { done: C.mint, active: C.cyan, failed: C.red };
 function StoryPanel({ g, trace, sel }) {
-  const s = trace && trace.story; const [busy, setBusy] = React.useState(null); const owner = userId === ownerId;
+  const s = trace && trace.story; const [busy, setBusy] = React.useState(null); const owner = true;
   if (!trace) return <div style={{ font: '11.5px ' + SANS, color: C.mute }}>Loading…</div>;
   if (!s) return <div style={{ font: '11.5px ' + SANS, color: C.mute }}>No interpretation for this loop.</div>;
   const explain = async () => {
@@ -2423,7 +2466,7 @@ function UserDiv() {
         <button onClick={() => setModal({ kind: 'approvals' })} className="rounded-full gp-nw" style={{ font: '600 10.5px ' + SANS, padding: '4px 10px', color: apprN ? '#1a1206' : C.mute, background: apprN ? C.amber : 'transparent', border: '1px solid ' + (apprN ? C.amber : C.line2) }}>{apprN ? '● ' : ''}Approvals · {apprN}</button>
         <Btn small onClick={toggleFs} title="Full screen (Esc to exit). Best for demos.">{fs ? '⤡ Exit full screen' : '⤢ Full screen'}</Btn>
         {!narrow && <span className="gp-nw">MODE <b style={{ color: C.cyan }}>AUTONOMOUS · HUMAN-GATED</b></span>}
-        {userId === ownerId ? <span className="gp-nw" title="Verified Mana identity used for console approvals">OP {userId.slice(0, 6)}</span> : <span title="Live view for visitors. Approvals, payments and settings belong to the operator." style={{ color: C.amber }}>VISITOR · LIVE VIEW</span>}
+        {userId === ownerId ? <span className="gp-nw" title="Verified Mana identity used for console approvals">OP {userId.slice(0, 6)}</span> : <span className="gp-nw" title="Guest operator: you can run scenarios and approve; every action is audited under your Mana identity" style={{ color: C.amber }}>GUEST OP {userId.slice(0, 6)}</span>}
         <div className="relative"><Btn small onClick={() => setDemoOpen(!demoOpen)}>Demo ▾</Btn>
           {demoOpen && <div className="absolute right-0 mt-2 z-50 flex flex-col py-1" style={{ width: 290, background: C.p2, border: '1px solid ' + C.line2, borderRadius: 10, boxShadow: '0 20px 50px rgba(0,0,0,.5)' }}>
             {[['crah_bearing_wear', 'Predictive: C02 bearing starts wearing'], ['thermal', 'Start thermal incident (C02 degrades)'], ['security_anomaly', 'Security: after-hours access + firmware attempt'], ['arm_post_apply_failure', 'Arm post-apply failure (rollback demo)'], ['repair_c02', 'Repair C02'], ['repair_all', 'Repair all assets'], ['reset', 'Reset demo']].map(([k, l]) => <button key={k} onClick={() => demo(k)} className="text-left px-3 py-2 hover:bg-white/5" style={{ font: '11.5px ' + SANS, color: k === 'reset' ? C.amber : C.text }}>{l}</button>)}
@@ -2461,6 +2504,7 @@ function UserDiv() {
       <textarea value={rej} onChange={e => setRej(e.target.value)} onKeyDown={e => e.stopPropagation()} rows={3} className="w-full mt-2 p-2 rounded outline-none" style={{ background: C.p1, border: '1px solid ' + C.line2, color: C.text, font: '12px ' + SANS }} />
       <div className="flex gap-2 mt-3 justify-end"><Btn onClick={() => setModal(null)}>Cancel</Btn><Btn tone="danger" onClick={async () => { try { await g.api('/api/incidents/' + inc.id + '/reject', 'POST', { reason: rej || 'rejected from console' }); toast('Plan rejected', 'ok'); } catch (e) { toast(e.message, 'err'); } setModal(null); setRej(''); }}>Reject plan</Btn></div>
     </Modal>}
+    {g.needPhone && tab !== 'control' && <div className="absolute inset-0 z-40 flex items-center justify-center" style={{ background: 'rgba(3,6,12,.6)' }} onClick={() => g.setNeedPhone(false)}><div onClick={e => e.stopPropagation()}><PhoneCard g={g} toast={toast} onDone={() => g.setNeedPhone(false)} /></div></div>}
     <div className="absolute left-1/2 -translate-x-1/2 bottom-5 z-50 flex flex-col gap-2 items-center pointer-events-none">{toasts.map(t => <div key={t.id} style={{ background: C.p2, border: '1px solid ' + (t.kind === 'err' ? 'rgba(255,89,110,.5)' : 'rgba(79,224,165,.45)'), color: t.kind === 'err' ? C.red : C.mint, font: '12px ' + SANS, padding: '8px 14px', borderRadius: 999, boxShadow: '0 10px 30px rgba(0,0,0,.4)' }}>{t.msg}</div>)}</div>
   </div>;
 }

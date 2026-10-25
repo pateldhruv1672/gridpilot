@@ -1,6 +1,6 @@
 
 """GRIDPILOT backend server. Single source of truth: simulator + incident engine. REST + WebSocket + agent tool endpoints."""
-import asyncio, json, os, pickle, secrets, sys, time, traceback
+import asyncio, json, os, pickle, re, secrets, sys, time, traceback
 from collections import deque
 from aiohttp import web, WSMsgType
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -111,6 +111,26 @@ def viewer(req):
     u = sender(req)
     if not u: raise web.HTTPUnauthorized(text=json.dumps({"error": "sign in to Mana to view"}), content_type="application/json")
     return u
+
+PHONE_RE = re.compile(r"^\+[1-9]\d{7,14}$")
+def operators(): return ENG.db.get("operators") or {}
+def operator_of(u):
+    """The phone this user registered (or chose to keep the default on-call). Owner falls back to the configured operator."""
+    o = operators().get(u)
+    if o: return o
+    if u == OWNER:
+        d = ENG.db.get("operator") or {}
+        return {**d, "default": True} if d.get("phone") else None
+    return None
+def need_phone(u):
+    if not operator_of(u):
+        raise web.HTTPPreconditionRequired(text=json.dumps({"error": "phone_required", "message": "Add a phone number first (panel beside the 3D view) so the voice agent can call you for approvals."}), content_type="application/json")
+def set_oncall(u):
+    if operator_of(u): ENG.db.set("oncall_uid", u)
+def operator(req):
+    """Any signed-in Mana user may operate (run scenarios, approve, decide) once they have registered a phone. Every action is audited under their uid."""
+    u = viewer(req); need_phone(u); return u
+def mask(p): return (p[:2] + " •••" + p[-4:]) if p else None
 
 # ---------------------------------------------------------------- views
 def plan_view(p):
@@ -295,7 +315,7 @@ async def api_gpu_rack(req):
 
 @routes.post("/api/trace/{kind}/{ident}/explanation")
 async def api_trace_expl(req):
-    owner_only(req); b = await req.json()
+    operator(req); b = await req.json()
     ENG.db.ex("insert or replace into trace_expl values(?,?,?,?)", (req.match_info["kind"] + ":" + req.match_info["ident"], time.time(), str(b.get("chat_id") or "")[:60], str(b.get("text") or "")[:8000]))
     ENG.event(None, "trace_explained", "mana:explainer", {"trace": req.match_info["kind"] + ":" + req.match_info["ident"], "chat_id": b.get("chat_id")}); DIRTY["v"] = True
     return jresp({"ok": True})
@@ -314,12 +334,12 @@ async def api_scen(req): viewer(req); return jresp({"scenarios": SCEN.defs(), "c
 
 @routes.post("/api/scenarios/{sid}/run")
 async def api_scen_run(req):
-    uid = owner_only(req); b = await req.json() if req.can_read_body else {}
+    uid = operator(req); b = await req.json() if req.can_read_body else {}; set_oncall(uid)
     ok, msg = await SCEN.start(req.match_info["sid"], reset=b.get("reset", True), actor="operator:" + uid[:8]); DIRTY["v"] = True
     return jresp({"ok": ok, "message": msg}, 200 if ok else 409)
 
 @routes.post("/api/scenarios/stop")
-async def api_scen_stop(req): uid = owner_only(req); SCEN.stop("operator:" + uid[:8]); DIRTY["v"] = True; return jresp({"ok": True, "message": "scenario stopped"})
+async def api_scen_stop(req): uid = operator(req); SCEN.stop("operator:" + uid[:8]); DIRTY["v"] = True; return jresp({"ok": True, "message": "scenario stopped"})
 
 @routes.get("/api/reasoning")
 async def api_reasoning(req):
@@ -459,14 +479,14 @@ async def api_ghost_blueprint(req):
 
 @routes.post("/api/ghost/proposals/{pid}/{action}")
 async def api_ghost_decide(req):
-    uid = owner_only(req); a = req.match_info["action"]
+    uid = operator(req); a = req.match_info["action"]
     if a not in ("approve", "dismiss"): return jresp({"ok": False, "message": "unknown action"}, 400)
     ok, msg = await GHOST.decide(req.match_info["pid"], a == "approve", "operator:" + uid[:8])
     return jresp({"ok": ok, "message": msg}, 200 if ok else 409)
 
 @routes.post("/api/ghost/orch/{oid}/{action}")
 async def api_ghost_orch(req):
-    uid = owner_only(req); a = req.match_info["action"]; oid = req.match_info["oid"]
+    uid = operator(req); a = req.match_info["action"]; oid = req.match_info["oid"]
     if a == "retire": GHOST.retire(oid, "operator:" + uid[:8]); return jresp({"ok": True, "message": "retired"})
     if a == "run":
         ref, err = await GHOST.run_agent(oid, {"type": "manual", "by": "operator"}); return jresp({"ok": bool(ref), "message": ("run " + ref) if ref else err})
@@ -508,7 +528,7 @@ async def ws_handler(req):
 async def api_state(req): viewer(req); return jresp(full_state())
 
 @routes.get("/api/facility/state")
-async def api_fac(req): owner_only(req); return jresp(SIM.snapshot(field=False))
+async def api_fac(req): viewer(req); return jresp(SIM.snapshot(field=False))
 
 def do_reset():
     global SIM
@@ -527,17 +547,40 @@ def do_reset():
 
 @routes.post("/api/simulation/reset")
 async def api_reset(req):
-    owner_only(req); do_reset()
+    operator(req); do_reset()
     return jresp({"ok": True})
+
+@routes.get("/api/me")
+async def api_me(req):
+    u = viewer(req); o = operator_of(u); d = ENG.db.get("operator") or {}; oc = ENG.db.get("oncall_uid")
+    return jresp({"uid": u, "is_owner": u == OWNER, "registered": bool(o), "operator": o and {"name": o.get("name"), "phone_masked": mask(o.get("phone")), "default": bool(o.get("default"))},
+                  "default_operator": {"name": d.get("name"), "phone_masked": mask(d.get("phone"))}, "oncall_is_me": oc == u or (not oc and u == OWNER)})
+
+@routes.post("/api/me/phone")
+async def api_me_phone(req):
+    u = viewer(req); b = await req.json()
+    ops = operators()
+    if b.get("use_default"):
+        d = ENG.db.get("operator") or {}
+        if not d.get("phone"): return jresp({"ok": False, "message": "no default on-call number is configured"}, 400)
+        ops[u] = {"name": d.get("name") or "On-call", "phone": d["phone"], "consent": True, "default": True, "at": time.time()}
+    else:
+        phone = re.sub(r"[\s().-]", "", str(b.get("phone") or ""))
+        if phone and not phone.startswith("+"): phone = "+1" + phone if len(phone) == 10 else "+" + phone
+        if not PHONE_RE.match(phone): return jresp({"ok": False, "message": "enter the number in international format, e.g. +1 510 555 0100"}, 400)
+        if not b.get("consent"): return jresp({"ok": False, "message": "tick the consent box: GRIDPILOT will place automated voice calls to this number"}, 400)
+        name = (str(b.get("name") or "").strip() or "Operator")[:40]
+        ops[u] = {"name": name, "phone": phone, "consent": True, "consent_at": time.time(), "default": False, "at": time.time()}
+    ENG.db.set("operators", ops); ENG.db.set("oncall_uid", u)
+    ENG.event(None, "operator_registered", ("operator:" if u == OWNER else "visitor:") + u[:8], {"name": ops[u]["name"], "phone_masked": mask(ops[u]["phone"]), "default": ops[u].get("default", False)})
+    DIRTY["v"] = True
+    return jresp({"ok": True, "message": "Calls for your scenarios go to " + mask(ops[u]["phone"])})
 
 @routes.post("/api/simulation/inject")
 async def api_inject(req):
     u = viewer(req); b = await req.json()
-    if u != OWNER:   # visitors may start the demo scenario only when nothing is in progress
-        cur = ENG.open_incident()
-        if b.get("kind") not in ("thermal", "crah_bearing_wear") or (cur and cur["state"] not in ("CLOSED",)):
-            return jresp({"ok": False, "message": "visitors can start the demo incident only when no incident is in progress"}, 403)
-        ENG.event(None, "visitor_demo_started", "visitor:" + u[:8], {})
+    need_phone(u); set_oncall(u)
+    if u != OWNER: ENG.event(None, "visitor_demo_started", "visitor:" + u[:8], {"kind": b.get("kind")})
     r = do_inject(b.get("kind"), "demo-control:" + u[:6], b.get("unit"))
     return jresp(r, 200 if r.get("ok") else 400)
 
@@ -560,42 +603,42 @@ def do_inject(k, actor, unit=None):
 
 @routes.post("/api/simulation/speed")
 async def api_speed(req):
-    owner_only(req); b = await req.json()
+    operator(req); b = await req.json()
     if "speed" in b: ENG.speed = float(min(10, max(0.25, b["speed"])))
     if "paused" in b: ENG.paused = bool(b["paused"])
     DIRTY["v"] = True; return jresp({"speed": ENG.speed, "paused": ENG.paused})
 
 @routes.get("/api/incidents")
-async def api_incs(req): owner_only(req); return jresp(ENG.db.all("select id,state,rack,created from incidents order by created desc"))
+async def api_incs(req): viewer(req); return jresp(ENG.db.all("select id,state,rack,created from incidents order by created desc"))
 
 @routes.get("/api/incidents/{id}")
-async def api_inc(req): owner_only(req); return jresp(incident_detail(ENG.incident(req.match_info["id"])))
+async def api_inc(req): viewer(req); return jresp(incident_detail(ENG.incident(req.match_info["id"])))
 
 @routes.get("/api/incidents/{id}/audit")
 async def api_audit(req):
-    owner_only(req); return jresp([dict(r, data=json.loads(r["data"])) for r in ENG.db.all("select * from events where incident_id=? order by id", (req.match_info["id"],))])
+    viewer(req); return jresp([dict(r, data=json.loads(r["data"])) for r in ENG.db.all("select * from events where incident_id=? order by id", (req.match_info["id"],))])
 
 @routes.post("/api/incidents/{id}/approve")
 async def api_approve(req):
-    uid = owner_only(req); b = await req.json()
+    uid = operator(req); b = await req.json()
     ok, msg = ENG.verify_approval(req.match_info["id"], b.get("plan_id"), b.get("plan_version"), "dashboard", "operator:" + uid[:8])
     return jresp({"ok": ok, "message": msg}, 200 if ok else 409)
 
 @routes.post("/api/maintenance/{id}/approve")
 async def api_wo_approve(req):
-    uid = owner_only(req); b = await req.json()
+    uid = operator(req); b = await req.json()
     ok, msg = await REL.approve(req.match_info["id"], b.get("version"), "operator:" + uid[:8])
     return jresp({"ok": ok, "message": msg}, 200 if ok else 409)
 
 @routes.post("/api/maintenance/{id}/reject")
 async def api_wo_reject(req):
-    uid = owner_only(req); b = await req.json()
+    uid = operator(req); b = await req.json()
     try: REL.reject(req.match_info["id"], "operator:" + uid[:8], b.get("reason") or "rejected from console"); return jresp({"ok": True, "message": "rejected"})
     except Exception as e: return jresp({"ok": False, "message": str(e)}, 409)
 
 @routes.post("/api/maintenance/{id}/plan")
 async def api_wo_plan(req):
-    uid = owner_only(req); b = await req.json() if req.can_read_body else {}
+    uid = operator(req); b = await req.json() if req.can_read_body else {}
     wo = REL.get(req.match_info["id"])
     if not wo or wo["state"] in ("CLOSED", "REJECTED", "FAILED", "SCHEDULED", "IN_MAINTENANCE"): return jresp({"ok": False, "message": "work order not open for planning"}, 409)
     ref = await REL.start_planning(wo["id"], "operator:" + uid[:8], (b or {}).get("note"))
@@ -603,7 +646,7 @@ async def api_wo_plan(req):
 
 @routes.post("/api/maintenance/{id}/evaluate")
 async def api_wo_eval(req):
-    owner_only(req); b = await req.json()
+    operator(req); b = await req.json()
     try: return jresp(await REL.evaluate(req.match_info["id"], b.get("actions", []), b.get("maintenance_start_in_s")))
     except Exception as e: return jresp({"error": str(e)}, 400)
 
@@ -614,25 +657,25 @@ async def api_trace(req):
 
 @routes.post("/api/incidents/{id}/renew-approval")
 async def api_renew(req):
-    uid = owner_only(req)
+    uid = operator(req)
     ok, msg, aid = await ENG.renew_approval(req.match_info["id"], "operator:" + uid[:8])
     return jresp({"ok": ok, "message": msg, "approval_id": aid}, 200 if ok else 409)
 
 @routes.post("/api/incidents/{id}/reject")
 async def api_reject(req):
-    uid = owner_only(req); b = await req.json()
+    uid = operator(req); b = await req.json()
     try: ENG.reject(req.match_info["id"], "operator:" + uid[:8], b.get("reason") or "rejected from console"); return jresp({"ok": True})
     except Exception as e: return jresp({"ok": False, "message": str(e)}, 409)
 
 @routes.post("/api/incidents/{id}/escalate")
 async def api_escalate(req):
-    uid = owner_only(req); b = await req.json()
+    uid = operator(req); b = await req.json()
     try: ENG.escalate(req.match_info["id"], "operator:" + uid[:8], b.get("reason") or "escalated from console"); return jresp({"ok": True})
     except Exception as e: return jresp({"ok": False, "message": str(e)}, 409)
 
 @routes.post("/api/incidents/{id}/alternative")
 async def api_alt(req):
-    uid = owner_only(req); b = await req.json(); iid = req.match_info["id"]
+    uid = operator(req); b = await req.json(); iid = req.match_info["id"]
     sug = (b.get("suggestion") or "").strip()
     if not sug: return jresp({"ok": False, "message": "suggestion required"}, 400)
     ENG.event(iid, "operator_suggestion", "operator:" + uid[:8], {"suggestion": sug, "channel": "dashboard"})
@@ -641,7 +684,7 @@ async def api_alt(req):
 
 @routes.post("/api/incidents/{id}/call")
 async def api_call(req):
-    uid = owner_only(req); iid = req.match_info["id"]
+    uid = operator(req); iid = req.match_info["id"]; set_oncall(uid)
     if ENG.active_call(iid): return jresp({"ok": False, "message": "a call is already active"}, 409)
     inc = ENG.incident(iid)
     if inc and inc["state"] == "AWAITING_APPROVAL":
@@ -651,26 +694,26 @@ async def api_call(req):
 
 @routes.post("/api/incidents/{id}/execute")
 async def api_exec(req):
-    uid = owner_only(req); b = await req.json()
+    uid = operator(req); b = await req.json()
     ok, msg = await ENG.request_execution(req.match_info["id"], b.get("plan_id"), b.get("plan_version"), "operator:" + uid[:8])
     return jresp({"ok": ok, "message": msg}, 200 if ok else 409)
 
 @routes.post("/api/incidents/{id}/retry-agent")
 async def api_retry(req):
-    owner_only(req); iid = req.match_info["id"]; inc = ENG.incident(iid)
+    operator(req); iid = req.match_info["id"]; inc = ENG.incident(iid)
     run = await ENG.start_creao(iid, "diagnose_and_plan" if inc["state"] in ("DETECTED", "TRIAGING") else "replan_after_failure", {"retry": True})
     return jresp({"ok": bool(run), "run_ref": run})
 
 @routes.post("/api/incidents/{id}/evaluate")
 async def api_eval(req):
-    owner_only(req); b = await req.json(); iid = req.match_info["id"]
+    operator(req); b = await req.json(); iid = req.match_info["id"]
     try: ev = await ENG.evaluate(b.get("actions", []), ENG.incident(iid)["rack"], b.get("label"))
     except Exception as e: return jresp({"error": str(e)}, 400)
     remember_option(iid, ev, "operator what-if"); return jresp(ev)
 
 @routes.get("/api/incidents/{id}/approval-code")
 async def api_code(req):
-    owner_only(req); a = ENG.pending_approval(req.match_info["id"])
+    operator(req); a = ENG.pending_approval(req.match_info["id"])
     if not a: return jresp({"code": None})
     d = json.loads(a["data"]); return jresp({"code": d.get("code_plain_for_owner"), "plan_id": a["plan_id"], "plan_version": a["plan_version"], "expires": a["expires"]})
 
@@ -720,7 +763,7 @@ async def api_test(req):
 
 @routes.post("/api/incidents/{id}/specialist")
 async def api_specialist(req):
-    uid = owner_only(req); b = await req.json(); iid = req.match_info["id"]
+    uid = operator(req); b = await req.json(); iid = req.match_info["id"]
     q = (b.get("question") or "").strip()
     if not q: return jresp({"ok": False, "message": "question required"}, 400)
     ref = await ENG.spawn_specialist(iid, (b.get("kind") or "custom")[:40], q, b.get("mission"), requested_by="operator:" + uid[:8])
@@ -729,7 +772,7 @@ async def api_specialist(req):
 
 @routes.post("/api/specialists/{ref}/adopt")
 async def api_adopt(req):
-    uid = owner_only(req)
+    uid = operator(req)
     try: res = await ENG.adopt_specialist(req.match_info["ref"], "operator:" + uid[:8])
     except ValueError as e: return jresp({"ok": False, "message": str(e)}, 400)
     DIRTY["v"] = True
@@ -737,7 +780,7 @@ async def api_adopt(req):
 
 @routes.post("/api/specialists/prepare")
 async def api_prepare(req):
-    owner_only(req)
+    operator(req)
     ENG._cli_checked = 0
     if not ENG.creao_config()["cli"]: return jresp({"ok": False, "message": "save the CREAO CLI key (cr_sk_) first"}, 400)
     try:
@@ -753,14 +796,14 @@ async def api_desk(req): viewer(req); return jresp(DESK.snapshot())
 @routes.post("/api/finance/invoices/{id}/{action}")
 async def api_inv_action(req):
     if req.match_info["action"] == "ask": return await api_inv_ask(req)
-    uid = owner_only(req); b = await req.json() if req.can_read_body else {}
+    uid = operator(req); b = await req.json() if req.can_read_body else {}
     try: r = DESK.controller_action(req.match_info["id"], req.match_info["action"], uid, (b or {}).get("note", ""))
     except ValueError as ex: return jresp({"ok": False, "message": str(ex)}, 400)
     return jresp(r)
 
 @routes.post("/api/finance/payment-run")
 async def api_payrun(req):
-    uid = owner_only(req); return jresp({"ok": True, "paid": DESK.payment_run(uid)})
+    uid = operator(req); return jresp({"ok": True, "paid": DESK.payment_run(uid)})
 
 async def start_fin_agent(kind, name, text, tools, request, meta):
     cfg = ENG.creao_config()
@@ -780,7 +823,7 @@ async def start_fin_agent(kind, name, text, tools, request, meta):
 
 @routes.post("/api/finance/invoices/{id}/ask")
 async def api_inv_ask(req):
-    uid = owner_only(req); b = await req.json(); iid = req.match_info["id"]; q = str(b.get("question") or "").strip()[:600]
+    uid = operator(req); b = await req.json(); iid = req.match_info["id"]; q = str(b.get("question") or "").strip()[:600]
     if not ENG.db.one("select id from ap_invoices where id=?", (iid,)): return jresp({"ok": False, "message": "unknown invoice"}, 404)
     if len(q) < 4: return jresp({"ok": False, "message": "ask a question"}, 400)
     ENG.db.ex("insert into ap_decisions(invoice_id,ts,actor,decision,amount,reason,evidence,kind) values(?,?,?,?,?,?,?,?)", (iid, time.time(), "operator:" + uid[:8], "question", 0, q, "[]", "question"))
@@ -792,7 +835,7 @@ async def api_inv_ask(req):
 @routes.post("/api/finance/invoices")
 async def api_inv_new(req):
     """Reviewer scenario: submit any invoice; it goes through the same autonomous pass as the seeded inbox."""
-    owner_only(req); b = await req.json()
+    operator(req); b = await req.json()
     try: iid = DESK.submit_invoice(b)
     except ValueError as ex: return jresp({"ok": False, "message": str(ex)}, 400)
     res = dict(DESK.autonomous_pass("agent:ap")).get(iid)
@@ -808,22 +851,22 @@ async def run_ap_review():
 
 @routes.post("/api/finance/ap-review")
 async def api_ap_review(req):
-    owner_only(req)
+    operator(req)
     return jresp(await run_ap_review())
 
 @routes.get("/api/finance/summary")
-async def api_fin(req): owner_only(req); return jresp(finance_summary())
+async def api_fin(req): viewer(req); return jresp(finance_summary())
 
 @routes.post("/api/finance/reconcile")
 async def api_recon(req):
-    owner_only(req); b = await req.json()
+    operator(req); b = await req.json()
     r = ENG.db.one("select * from invoices where id=?", (b.get("invoice_id"),))
     if not r: return jresp({"error": "unknown invoice"}, 404)
     d = json.loads(r["data"]); rec = FIN.reconcile(d["invoice"], d["usage"], d["transfers"])
     ENG.event(r["incident_id"], "invoice_reconciled", "finance-engine", {"invoice_id": r["id"], **rec}); return jresp(rec)
 
 @routes.get("/api/config/diff/{sha}")
-async def api_diff(req): owner_only(req); return jresp({"diff": CS.show_diff(req.match_info["sha"])})
+async def api_diff(req): viewer(req); return jresp({"diff": CS.show_diff(req.match_info["sha"])})
 
 
 FIN_TOOLS = ["fin_list_invoices", "fin_analyze_invoice", "fin_vendor_history", "fin_policy", "fin_recommend", "fin_draft_dispute", "submit_report"]
