@@ -261,6 +261,12 @@ async def api_approve(req):
     ok, msg = ENG.verify_approval(req.match_info["id"], b.get("plan_id"), b.get("plan_version"), "dashboard", "operator:" + uid[:8])
     return jresp({"ok": ok, "message": msg}, 200 if ok else 409)
 
+@routes.post("/api/incidents/{id}/renew-approval")
+async def api_renew(req):
+    uid = owner_only(req)
+    ok, msg, aid = await ENG.renew_approval(req.match_info["id"], "operator:" + uid[:8])
+    return jresp({"ok": ok, "message": msg, "approval_id": aid}, 200 if ok else 409)
+
 @routes.post("/api/incidents/{id}/reject")
 async def api_reject(req):
     uid = owner_only(req); b = await req.json()
@@ -286,6 +292,10 @@ async def api_alt(req):
 async def api_call(req):
     uid = owner_only(req); iid = req.match_info["id"]
     if ENG.active_call(iid): return jresp({"ok": False, "message": "a call is already active"}, 409)
+    inc = ENG.incident(iid)
+    if inc and inc["state"] == "AWAITING_APPROVAL":
+        ok, msg, _ = await ENG.renew_approval(iid, "operator:" + uid[:8])
+        if not ok: return jresp({"ok": False, "message": msg}, 409)
     cid = await ENG.start_call(iid, "operator:" + uid[:8]); return jresp({"ok": bool(cid), "call_id": cid})
 
 @routes.post("/api/incidents/{id}/execute")

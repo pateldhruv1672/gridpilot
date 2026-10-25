@@ -587,6 +587,27 @@ class Engine:
     def pending_approval(self, inc_id):
         return self.db.one("select * from approvals where incident_id=? and status in ('pending','code_issued') order by created desc limit 1", (inc_id,))
 
+    async def renew_approval(self, inc_id, actor):
+        """An approval window lapsed while the plan was still current. Re-evaluate the exact same plan against live telemetry;
+        if it is still valid, open a fresh approval window for the same plan version. Otherwise hand it back to CREAO to replan."""
+        inc = self.incident(inc_id); plan = self.current_plan(inc_id)
+        if not inc or inc["state"] != "AWAITING_APPROVAL" or not plan: return False, "nothing to renew (state %s)" % (inc or {}).get("state"), None
+        live = self.pending_approval(inc_id)
+        if live and now() <= live["expires"]: return True, "approval window still open", live["id"]
+        ev = await self.evaluate(plan["actions"], inc["rack"], "renewal re-check")
+        dec = ev["policy"]["decision"]; rec = ev["forecast"].get("recover_s")
+        self.db.ex("update approvals set status='expired' where incident_id=? and status in ('pending','code_issued')", (inc_id,))
+        summary = {"plan_id": plan["id"], "plan_version": plan["version"], "policy": dec, "recover_s": rec,
+                   "incremental_cost_usd": ev["finance"]["incremental_cost_usd"], "was": {"recover_s": plan["evaluation"]["forecast"].get("recover_s"), "incremental_cost_usd": plan["evaluation"]["finance"]["incremental_cost_usd"]}}
+        if dec != "APPROVAL_REQUIRED" or rec is None:
+            self.event(inc_id, "approval_renewal_rejected", actor, {**summary, "reason": "plan no longer valid on live telemetry"})
+            await self.start_creao(inc_id, "replan_after_failure", {"rejection": "approval lapsed and re-check failed: policy %s, recovery %s" % (dec, rec)})
+            return False, "plan no longer holds on live telemetry; CREAO asked to replan", None
+        aid = "APR-%s" % secrets.token_hex(3)
+        self.db.ex("insert into approvals values(?,?,?,?,?,?,?,?)", (aid, inc_id, plan["id"], plan["version"], now(), now() + APPROVAL_TTL_S, "pending", jd({"renewal": summary})))
+        self.event(inc_id, "approval_renewed", actor, {**summary, "approval_id": aid})
+        return True, "re-checked on live telemetry; approval window renewed for %s v%d" % (plan["id"], plan["version"]), aid
+
     def verify_approval(self, inc_id, plan_id, plan_version, channel, actor, code=None):
         inc = self.incident(inc_id); plan = self.current_plan(inc_id); apr = self.pending_approval(inc_id)
         if not inc or inc["state"] != "AWAITING_APPROVAL": return False, "incident is not awaiting approval (state %s)" % (inc or {}).get("state")
@@ -594,7 +615,7 @@ class Engine:
             return False, "stale approval: current plan is %s v%s" % (plan and plan["id"], plan and plan["version"])
         if not apr or apr["plan_version"] != plan["version"]: return False, "no pending approval for this plan version"
         if now() > apr["expires"]:
-            self.db.ex("update approvals set status='expired' where id=?", (apr["id"],)); return False, "approval request expired"
+            self.db.ex("update approvals set status='expired' where id=?", (apr["id"],)); return False, "approval window expired; use Re-check & renew"
         if channel == "voice":
             d = json.loads(apr["data"])
             if not code or "code_hash" not in d or hashlib.sha256(str(code).strip().encode()).hexdigest() != d["code_hash"]:
