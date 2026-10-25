@@ -34,7 +34,7 @@ function sample(F, x, z) {
 }
 function statusColor(s) { return s === 'critical' ? C.red : s === 'elevated' ? C.amber : C.mint; }
 
-function DataCenterScene({ snapRef, opts, selected, onSelect, camCmd }) {
+function DataCenterScene({ snapRef, gpusRef, opts, selected, onSelect, camCmd }) {
   const wrap = React.useRef(null), labelsRef = React.useRef(null);
   const optsRef = React.useRef(opts); optsRef.current = opts;
   const selRef = React.useRef(selected); selRef.current = selected;
@@ -86,6 +86,10 @@ function DataCenterScene({ snapRef, opts, selected, onSelect, camCmd }) {
     const leds = new THREE.InstancedMesh(new THREE.BoxGeometry(0.4, 0.05, 0.02), new THREE.MeshBasicMaterial({ color: 0xffffff }), 64);
     for (let i = 0; i < 64; i++) { const r = Math.floor(i / 8); const [x, z] = rackPos(i); const face = r % 2 === 0 ? z + 0.57 : z - 0.57; m4.makeTranslation(x, 1.75, face); leds.setMatrixAt(i, m4); leds.setColorAt(i, col.set(C.mint)); }
     scene.add(leds);
+    // per-GPU blades on the cold-aisle face (8 per rack, 512 total)
+    const blades = new THREE.InstancedMesh(new THREE.BoxGeometry(0.46, 0.115, 0.025), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95 }), 512);
+    for (let g = 0; g < 512; g++) { const i = g >> 3, k = g & 7, r = Math.floor(i / 8); const [x, z] = rackPos(i); const face = r % 2 === 0 ? z + 0.565 : z - 0.565; m4.makeTranslation(x, 0.3 + k * 0.17, face); blades.setMatrixAt(g, m4); blades.setColorAt(g, col.set(0x1a2433)); }
+    scene.add(blades);
     // selection box
     const selBox = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(0.76, 2.16, 1.26)), new THREE.LineBasicMaterial({ color: 0x43d9f5, transparent: true, opacity: 1 }));
     selBox.visible = false; scene.add(selBox);
@@ -217,6 +221,10 @@ function DataCenterScene({ snapRef, opts, selected, onSelect, camCmd }) {
           leds.setColorAt(i, col.set(sc).multiplyScalar(pulse));
         }
         edgeGeo.attributes.color.needsUpdate = true; racks.instanceColor.needsUpdate = true; leds.instanceColor.needsUpdate = true;
+        const gp = gpusRef && gpusRef.current;
+        if (gp) { for (let g = 0; g < 512; g++) { let c3; if (mode === 'power') c3 = ramp((gp.power[g] - 60) / 420); else if (mode === 'workload') c3 = gp.owner[g] ? ramp(gp.util[g] * 0.9) : [0.12, 0.16, 0.22]; else c3 = ramp((gp.temp[g] - 55) / 40);
+          const th = gp.throttle[g] && !reduced ? 0.6 + 0.4 * Math.sin(clock * 7 + g) : 1; const dim = gp.owner[g] ? 1 : 0.35; blades.setColorAt(g, col.setRGB(c3[0] * th * dim, c3[1] * th * dim, c3[2] * th * dim)); }
+          blades.instanceColor.needsUpdate = true; }
         if (sel != null) { const [x, z] = rackPos(sel); selBox.position.set(x, 1.0, z); selBox.visible = true; selBox.material.opacity = 0.6 + 0.4 * Math.sin(clock * 3); } else selBox.visible = false;
         snap.cooling.forEach((u, k) => { const bad = 1 - u.effectiveness; crah[k].g.material.emissive.set(bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan); crah[k].g.material.emissiveIntensity = 0.12 + 0.25 * (bad > 0.15 ? (reduced ? 1 : 0.6 + 0.4 * Math.sin(clock * 4)) : 0.3); crah[k].grille.material.color.set(bad > 0.4 ? C.red : bad > 0.15 ? C.amber : C.cyan); crah[k].grille.material.opacity = 0.12 + 0.35 * u.flow_factor * u.fan_pct / 100; });
         // plumes on hot racks
@@ -345,7 +353,7 @@ function Diff({ text }) {
 
 function useGridpilot() {
   const { url, wsUrl, error } = useIngressUrl('gridpilot', { ttlSeconds: 7 * 86400 });
-  const snapRef = React.useRef(null); const twinRef = React.useRef(null);
+  const snapRef = React.useRef(null); const twinRef = React.useRef(null); const gpusRef = React.useRef(null);
   const [tickN, setTickN] = React.useState(0);
   const [state, setState] = React.useState(null);
   const [conn, setConn] = React.useState('connecting');
@@ -368,14 +376,14 @@ function useGridpilot() {
         if (dead) return;
         ws = new WebSocket(wsUrl + '/ws?ticket=' + encodeURIComponent(ticket));
         ws.onopen = () => { retry = 0; setConn('live'); };
-        ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'tick') { snapRef.current = m.snap; if (m.twin) twinRef.current = m.twin; setTickN(n => n + 1); } else if (m.type === 'state') { if (m.state.twin && !twinRef.current) twinRef.current = m.state.twin; setState(m.state); } };
+        ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'tick') { snapRef.current = m.snap; if (m.twin) twinRef.current = m.twin; if (m.gpus) gpusRef.current = m.gpus; setTickN(n => n + 1); } else if (m.type === 'state') { if (m.state.twin && !twinRef.current) twinRef.current = m.state.twin; if (m.state.gpus && !gpusRef.current) gpusRef.current = m.state.gpus; setState(m.state); } };
         ws.onclose = () => { if (dead) return; setConn('reconnecting'); timer = setTimeout(open, Math.min(8000, 800 * 2 ** retry++)); };
       } catch (e) { setConn('error: ' + e.message); timer = setTimeout(open, 4000); }
     };
     open();
     return () => { dead = true; clearTimeout(timer); if (ws) ws.close(); };
   }, [url, wsUrl, api]);
-  return { url, error, snapRef, twinRef, tickN, state, conn, api };
+  return { url, error, snapRef, twinRef, gpusRef, tickN, state, conn, api };
 }
 
 function Metric({ label, value, unit, sub, tone }) {
@@ -665,6 +673,211 @@ function TwinTab({ g, toast, narrow }) {
 }
 const SIG_KINDS = ['crah', 'ups', 'bess', 'chiller', 'pdu'];
 
+const GPU_METRICS = [['util', 'Utilization', v => Math.round(v * 100) + '%', v => v], ['temp', 'Temperature', v => v.toFixed(1) + '°C', v => (v - 55) / 40], ['power', 'Board power', v => v + ' W', v => (v - 60) / 420], ['mem', 'Memory', v => Math.round(v * 100) + '%', v => v]];
+function rgbOf(t) { const c = ramp(t); return 'rgb(' + Math.round(c[0] * 255) + ',' + Math.round(c[1] * 255) + ',' + Math.round(c[2] * 255) + ')'; }
+function FleetMap({ gp, metric, sel, onSel }) {
+  const ref = React.useRef(null); const wrap = React.useRef(null); const [hov, setHov] = React.useState(null); const geo = React.useRef(null);
+  const m = GPU_METRICS.find(x => x[0] === metric);
+  React.useEffect(() => {
+    const cv = ref.current, el = wrap.current; if (!cv || !el || !gp) return;
+    const W = el.clientWidth, dpr = Math.min(2, window.devicePixelRatio || 1);
+    const padL = 22, padT = 16, gapR = 6, gapRow = 12, rackW = (W - padL - 7 * gapR - 4) / 8, cellH = 9, rowH = cellH * 8 + 4;
+    const Hh = padT + 8 * rowH + 7 * gapRow + 6;
+    cv.width = W * dpr; cv.height = Hh * dpr; cv.style.width = W + 'px'; cv.style.height = Hh + 'px';
+    const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, Hh);
+    ctx.font = '600 9px ' + MONO; ctx.fillStyle = '#56677C';
+    for (let c = 0; c < 8; c++) ctx.fillText(String(c + 1), padL + c * (rackW + gapR) + rackW / 2 - 3, 10);
+    const cells = [];
+    for (let r = 0; r < 8; r++) { const y0 = padT + r * (rowH + gapRow); ctx.fillStyle = '#56677C'; ctx.fillText(ROWS[r], 6, y0 + rowH / 2 + 3);
+      for (let c = 0; c < 8; c++) { const ri = r * 8 + c, x0 = padL + c * (rackW + gapR);
+        ctx.fillStyle = 'rgba(255,255,255,.025)'; ctx.fillRect(x0 - 1, y0 - 1, rackW + 2, rowH);
+        for (let k = 0; k < 8; k++) { const g = ri * 8 + k; const v = gp[metric][g]; const y = y0 + (7 - k) * cellH;
+          ctx.fillStyle = gp.owner[g] || metric === 'temp' || metric === 'power' ? rgbOf(m[3](v)) : '#18212e'; ctx.globalAlpha = gp.owner[g] ? 1 : 0.45; ctx.fillRect(x0, y, rackW, cellH - 2); ctx.globalAlpha = 1;
+          if (gp.throttle[g]) { ctx.strokeStyle = gp.throttle[g] === 'thermal' ? '#FF596E' : '#FFBB55'; ctx.lineWidth = 1.5; ctx.strokeRect(x0 + 0.75, y + 0.75, rackW - 1.5, cellH - 3.5); }
+          cells.push([g, x0, y, rackW, cellH - 2]); }
+        if (sel === S_RID(ri)) { ctx.strokeStyle = '#43D9F5'; ctx.lineWidth = 1.5; ctx.strokeRect(x0 - 2.5, y0 - 2.5, rackW + 5, rowH + 1); }
+      } }
+    geo.current = cells;
+  });
+  const find = (e) => { const r = ref.current.getBoundingClientRect(); const x = e.clientX - r.left, y = e.clientY - r.top; const c = (geo.current || []).find(([, x0, y0, w, h]) => x >= x0 && x <= x0 + w && y >= y0 && y <= y0 + h + 2); return c ? { g: c[0], x, y } : null; };
+  return <div ref={wrap} className="relative w-full" onMouseLeave={() => setHov(null)}>
+    <canvas ref={ref} onMouseMove={e => setHov(find(e))} onClick={e => { const f = find(e); if (f) onSel(S_RID(f.g >> 3)); }} style={{ cursor: 'pointer', display: 'block' }} />
+    {hov && gp && <div className="absolute pointer-events-none px-2 py-1.5 rounded" style={{ left: Math.min(hov.x + 12, (wrap.current ? wrap.current.clientWidth : 400) - 190), top: hov.y + 12, width: 180, background: '#0d1522', border: '1px solid #24334a', font: '10px/1.5 ' + MONO, color: C.text, zIndex: 5 }}>
+      <b>{S_RID(hov.g >> 3)}-G{hov.g & 7}</b> {gp.throttle[hov.g] ? <span style={{ color: C.red }}>· {gp.throttle[hov.g]} throttle</span> : null}<br />
+      {gp.owner[hov.g] || 'idle'}<br />util {Math.round(gp.util[hov.g] * 100)}% · {gp.temp[hov.g]}°C<br />{gp.power[hov.g]} W · mem {Math.round(gp.mem[hov.g] * 100)}%</div>}
+  </div>;
+}
+const S_RID = (ri) => 'R' + String(ri + 1).padStart(2, '0');
+
+function GpuFleet({ g, narrow }) {
+  const gp = g.gpusRef.current || (g.state && g.state.gpus);
+  const [metric, setMetric] = React.useState('util'); const [rack, setRack] = React.useState('R17'); const [rd, setRd] = React.useState(null);
+  React.useEffect(() => { let dead = false; const load = () => g.api('/api/gpus/rack/' + rack).then(r => { if (!dead) setRd(r); }).catch(() => { }); load(); const t = setInterval(load, 3000); return () => { dead = true; clearInterval(t); }; }, [rack]);
+  if (!gp) return <div className="flex-1 p-6" style={{ color: C.mute, font: '12px ' + SANS }}>Waiting for per-GPU telemetry…</div>;
+  const s = gp.stats; const tk = Math.floor(g.tickN / 4);
+  const histOpt = { animation: false, grid: { left: 30, right: 8, top: 10, bottom: 22 }, tooltip: { backgroundColor: '#0d1522', borderColor: '#24334a', textStyle: { color: '#E6EEF7', fontFamily: MONO, fontSize: 10 } },
+    xAxis: { type: 'category', data: s.util_hist.map((_, i) => i * 10 + '–' + (i * 10 + 10) + '%'), ...axisStyle }, yAxis: { type: 'value', ...axisStyle },
+    series: [{ type: 'bar', name: 'allocated GPUs', data: s.util_hist.map((v, i) => ({ value: v, itemStyle: { color: rgbOf(i / 10), borderRadius: 3 } })), barWidth: '62%' }] };
+  const wls = Object.entries(s.workloads).sort((a, b) => b[1].gpus - a[1].gpus).slice(0, 14);
+  const wlOpt = { animation: false, grid: { left: 118, right: 40, top: 6, bottom: 18 }, tooltip: { trigger: 'axis', backgroundColor: '#0d1522', borderColor: '#24334a', textStyle: { color: '#E6EEF7', fontFamily: MONO, fontSize: 10 } },
+    xAxis: { type: 'value', ...axisStyle }, yAxis: { type: 'category', data: wls.map(w => w[0]), inverse: true, ...axisStyle },
+    series: [{ type: 'bar', name: 'GPUs', data: wls.map(w => ({ value: w[1].gpus, itemStyle: { color: rgbOf(w[1].mean_util * 0.9), borderRadius: 3 } })), barWidth: 9, label: { show: true, position: 'right', color: '#8A9BB0', fontSize: 9, fontFamily: MONO, formatter: p => Math.round(wls[p.dataIndex][1].mean_util * 100) + '%' } }] };
+  const gpusR = rd && rd.gpus;
+  const rackOpt = gpusR ? lineOpt(gpusR.map((x, k) => ({ name: 'G' + k, data: x.history.map(h => [h[0], h[2]]), color: ['#43D9F5', '#4FE0A5', '#FFBB55', '#FF596E', '#7aa2ff', '#b49cff', '#9fd8ec', '#ff9f6b'][k] }))) : null;
+  if (rackOpt) rackOpt.legend.show = false;
+  const mm = GPU_METRICS.find(x => x[0] === metric);
+  return <div className={'flex-1 min-h-0 flex flex-col overflow-auto'} style={{ background: C.bg }}>
+    <div className="px-3 pt-3 grid gap-2 overflow-x-auto" style={{ gridAutoFlow: 'column', gridAutoColumns: 'minmax(130px, 1fr)' }}>
+      <Kpi label="Allocated GPUs" value={s.allocated + ' / 512'} sub={s.idle + ' idle'} tone={C.cyan} />
+      <Kpi label="Utilization (allocated)" value={Math.round(s.mean_util_alloc * 100) + '%'} sub={'fleet ' + Math.round(s.fleet_util * 100) + '%'} />
+      <Kpi label="Throttling" value={s.throttled_thermal + s.throttled_power} sub={s.throttled_thermal + ' thermal · ' + s.throttled_power + ' power cap'} tone={s.throttled_thermal ? C.red : s.throttled_power ? C.amber : C.mint} />
+      <Kpi label="Hottest GPU" value={s.max_temp + '°C'} sub={s.hottest[0] ? s.hottest[0].gpu + ' · ' + (s.hottest[0].workload || 'idle') : ''} tone={s.max_temp > 87 ? C.red : s.max_temp > 82 ? C.amber : undefined} />
+      <Kpi label="GPU board power" value={s.board_power_kw + ' kW'} sub="sum of 512 boards" />
+      <Kpi label="Stranded idle GPUs" value={s.stranded_idle_on_hot_racks} sub="idle on racks above 78°C" />
+    </div>
+    <div className="grid gap-3 p-3 flex-1 min-h-0" style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(0, 1.5fr) minmax(320px, 1fr)' }}>
+      <Panel style={{ padding: 12 }}>
+        <div className="flex items-center gap-2 flex-wrap mb-2"><Label color={C.cyan}>GPU fleet · 64 racks × 8 GPUs</Label>
+          <div className="ml-auto flex gap-1">{GPU_METRICS.map(([k, l]) => <button key={k} onClick={() => setMetric(k)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '3px 10px', color: metric === k ? C.text : C.mute, background: metric === k ? 'rgba(67,217,245,.12)' : 'transparent', border: '1px solid ' + (metric === k ? 'rgba(67,217,245,.4)' : C.line) }}>{l}</button>)}</div></div>
+        <FleetMap gp={gp} metric={metric} sel={rack} onSel={setRack} />
+        <div className="flex items-center gap-3 mt-2 flex-wrap" style={{ font: '9.5px ' + MONO, color: C.dim }}>
+          <span className="flex items-center gap-1.5">{mm[1]} <span style={{ width: 120, height: 6, borderRadius: 3, background: 'linear-gradient(90deg,' + [0, .2, .4, .6, .8, 1].map(rgbOf).join(',') + ')' }} /></span>
+          <span className="flex items-center gap-1"><span style={{ width: 10, height: 7, border: '1.5px solid ' + C.red }} />thermal throttle</span><span className="flex items-center gap-1"><span style={{ width: 10, height: 7, border: '1.5px solid ' + C.amber }} />power-capped</span>
+          <span className="flex items-center gap-1"><span style={{ width: 10, height: 7, background: '#18212e' }} />idle</span><span>each column of 8 cells is one rack (G0 bottom, G7 top) · click a rack</span></div>
+      </Panel>
+      <div className="flex flex-col gap-3 min-w-0">
+        <Panel style={{ padding: 12 }}>
+          <div className="flex justify-between items-baseline"><Label color={C.cyan}>Rack {rack} · per-GPU</Label><span style={{ font: '9.5px ' + MONO, color: C.dim }}>live · temperature history below</span></div>
+          <div className="mt-2 flex flex-col gap-1">{gpusR ? gpusR.slice().reverse().map(x => <div key={x.gpu} className="grid items-center gap-2" style={{ gridTemplateColumns: '28px minmax(0,1fr) 92px 46px 50px', font: '10.5px ' + MONO }}>
+            <span style={{ color: C.mute }}>G{x.slot}</span>
+            <div className="min-w-0"><div className="truncate" style={{ color: x.workload ? C.text : C.dim }}>{x.workload || 'idle'}</div><div style={{ height: 4, borderRadius: 2, background: 'rgba(255,255,255,.05)', marginTop: 2 }}><div style={{ width: Math.round(x.util * 100) + '%', height: 4, borderRadius: 2, background: rgbOf(x.util * 0.9) }} /></div></div>
+            <span style={{ color: x.throttle ? C.red : C.text, whiteSpace: 'nowrap' }}>{Math.round(x.util * 100)}% · {x.temp}°C</span><span style={{ color: C.mute }}>{x.power_w}W</span><span style={{ color: x.throttle ? C.red : C.dim }}>{x.throttle ? x.throttle : x.clock_mhz + 'MHz'}</span></div>) : <div style={{ color: C.mute, font: '11px ' + SANS }}>Loading…</div>}</div>
+          {rackOpt && <EChart option={rackOpt} height={120} />}
+        </Panel>
+        <Panel style={{ padding: 10 }}><Label>Utilization distribution · allocated GPUs</Label><EChart option={histOpt} height={120} /></Panel>
+      </div>
+      <Panel style={{ padding: 10, gridColumn: narrow ? undefined : 'span 2' }}>
+        <div className="grid gap-3" style={{ gridTemplateColumns: narrow ? '1fr' : '1.3fr 1fr' }}>
+          <div><Label>GPUs per workload · bar colour = mean utilization</Label><EChart option={wlOpt} height={Math.max(140, wls.length * 15 + 26)} /></div>
+          <div><Label>Hottest GPUs</Label><div className="mt-1.5 flex flex-col gap-1">{s.hottest.map(h => <button key={h.gpu} onClick={() => setRack(h.gpu.split('-')[0])} className="text-left flex justify-between gap-2" style={{ font: '10.5px ' + MONO }}><span style={{ color: C.text }}>{h.gpu}</span><span className="truncate" style={{ color: C.dim }}>{h.workload || 'idle'}</span><span style={{ color: h.temp > 87 ? C.red : h.temp > 82 ? C.amber : C.mute }}>{h.temp}°C · {Math.round(h.util * 100)}%</span></button>)}</div></div>
+        </div>
+      </Panel>
+    </div>
+  </div>;
+}
+
+function OrchNode({ data }) {
+  const n = data.n; const col = n.v === 'v2-live' ? C.cyan : n.v === 'v2-proposed' ? C.amber : n.v === 'hub' ? (LOOP_COLOR[n.title] || C.mute) : '#6f8299';
+  return <div className="gp-tn" style={{ animationDelay: (data.delay || 0) + 'ms', width: n.v === 'hub' ? 150 : 210, background: n.v === 'hub' ? col + '14' : C.p2, border: (n.v === 'v2-proposed' ? '1px dashed ' : '1px solid ') + (n.v === 'v1' ? C.line2 : col), borderRadius: 10, padding: '7px 9px', color: C.text, boxShadow: n.v === 'v2-live' ? '0 0 16px rgba(67,217,245,.18)' : 'none' }}>
+    <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
+    <div className="flex items-center gap-1.5"><span style={{ font: '600 8.5px ' + MONO, letterSpacing: '.13em', color: col }}>{n.tag}</span>{n.v === 'v2-live' && <span className="gp-dot-live" style={{ marginLeft: 'auto', width: 6, height: 6, borderRadius: 6, background: C.cyan }} />}</div>
+    <div style={{ font: '600 11.5px/1.3 ' + SANS, marginTop: 2 }}>{n.title}</div>{n.sub && <div style={{ font: '9.5px/1.35 ' + MONO, color: C.mute, marginTop: 1 }}>{n.sub}</div>}
+    <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
+  </div>;
+}
+const ORCH_TYPES = { orch: OrchNode };
+function OrchMap({ g }) {
+  const st = g.state; const roster = (st && st.agent_summary && st.agent_summary.roster) || []; const gv = (st && st.ghost) || {};
+  const latest = (gv.runs || []).find(r => r.status === 'proposed'); const props = latest ? latest.data.proposals.filter(p => p.status === 'proposed') : [];
+  const active = (gv.active || []).filter(o => o.status === 'active');
+  const { nodes, edges } = React.useMemo(() => {
+    const N = [], E = []; const loops = ['Remediation', 'Reliability', 'Finance', 'Energy', 'Security', 'Capacity'];
+    loops.forEach((l, i) => N.push({ id: 'hub-' + l, type: 'orch', position: { x: 760, y: i * 92 }, data: { n: { v: 'hub', tag: 'LOOP', title: l } }, draggable: false }));
+    const col = { det: 0, agent: 380 }; const cnt = { det: 0, agent: 0 };
+    const add = (lane, id, n, loop) => { const y = cnt[lane]++ * 78; N.push({ id, type: 'orch', position: { x: col[lane] + (lane === 'agent' ? 0 : 0), y }, data: { n, delay: N.length * 40 }, draggable: false }); if (loop) E.push({ id: 'e' + id, source: id, target: 'hub-' + (loops.includes(loop) ? loop : 'Capacity'), animated: n.v !== 'v1', style: { stroke: n.v === 'v2-proposed' ? C.amber : n.v === 'v2-live' ? C.cyan : 'rgba(110,150,190,.35)', strokeDasharray: n.v === 'v2-proposed' ? '4 4' : undefined } }); };
+    add('det', 'v1-det', { v: 'v1', tag: 'V1 · DETECTOR', title: 'GPU hotspot > 88°C × 3 ticks', sub: 'deterministic' }, null); E.push({ id: 'ev1d', source: 'v1-det', target: 'v1-Remediation Agent', style: { stroke: 'rgba(110,150,190,.35)' } });
+    add('det', 'v1-pred', { v: 'v1', tag: 'V1 · PREDICTOR', title: 'RUL from sensor trends', sub: '10 assets' }, null); E.push({ id: 'ev1p', source: 'v1-pred', target: 'v1-Reliability Agent', style: { stroke: 'rgba(110,150,190,.35)' } });
+    roster.filter(a => !/Policy|Config/.test(a.name)).forEach(a => add('agent', 'v1-' + a.name, { v: 'v1', tag: 'V1 · ' + (a.kind === 'deterministic' ? 'RULES' : a.kind.toUpperCase()), title: a.name, sub: a.role }, a.loop));
+    active.forEach(o => { const sp = o.spec || {}; if (o.kind === 'detector') { add('det', o.id, { v: 'v2-live', tag: 'V2 · DETECTOR · LIVE', title: o.name, sub: sp.metric + ' ' + sp.op + ' ' + sp.threshold + ' × ' + sp.for_ticks + ' · fired ' + (o.fires || 0) }, null); const t = (sp.action || '').startsWith('run_agent:') ? active.find(a => a.kind === 'agent' && a.name.toLowerCase().replace(/[^a-z0-9]/g, '') === sp.action.slice(10).toLowerCase().replace(/[^a-z0-9]/g, '')) : null; if (t) E.push({ id: 'ed' + o.id, source: o.id, target: t.id, animated: true, style: { stroke: C.cyan } }); }
+      else if (o.kind === 'agent') add('agent', o.id, { v: 'v2-live', tag: 'V2 · CREAO AGENT · LIVE', title: o.name, sub: (sp.trigger ? sp.trigger.type : '') + ' · runs ' + (o.runs || 0) }, sp.loop);
+      else if (o.kind === 'scheduler') { add('det', o.id, { v: 'v2-live', tag: 'V2 · SCHEDULER · LIVE', title: o.name, sub: 'every ' + Math.round(sp.every_s / 60) + ' min → ' + sp.target }, null); const t = active.find(a => a.kind === 'agent' && ('agent:' + a.name).toLowerCase() === (sp.target || '').toLowerCase()); if (t) E.push({ id: 'es' + o.id, source: o.id, target: t.id, animated: true, style: { stroke: C.cyan } }); else if (sp.target === 'ap_review') E.push({ id: 'es' + o.id, source: o.id, target: 'v1-AP Analyst', animated: true, style: { stroke: C.cyan } }); } });
+    props.forEach(p => { const id = 'p-' + p.pid; if (p.kind === 'detector') add('det', id, { v: 'v2-proposed', tag: 'PROPOSED · DETECTOR', title: p.name, sub: p.metric + ' ' + p.op + ' ' + p.threshold }, null);
+      else if (p.kind === 'agent') add('agent', id, { v: 'v2-proposed', tag: 'PROPOSED · AGENT', title: p.name, sub: p.trigger ? p.trigger.type + (p.trigger.type === 'schedule' ? ' ' + Math.round(p.trigger.every_s / 60) + 'm' : '') : '' }, p.loop);
+      else if (p.kind === 'scheduler') add('det', id, { v: 'v2-proposed', tag: 'PROPOSED · SCHEDULER', title: p.name, sub: 'every ' + Math.round(p.every_s / 60) + ' min → ' + p.target }, null); });
+    props.forEach(p => { if (p.kind === 'detector' && (p.action || '').startsWith('run_agent:')) { const t = props.find(q => q.kind === 'agent' && q.name.toLowerCase() === p.action.slice(10).toLowerCase()); if (t) E.push({ id: 'epd' + p.pid, source: 'p-' + p.pid, target: 'p-' + t.pid, animated: true, style: { stroke: C.amber, strokeDasharray: '4 4' } }); }
+      if (p.kind === 'scheduler') { const t = props.find(q => q.kind === 'agent' && ('agent:' + q.name).toLowerCase() === (p.target || '').toLowerCase()); if (t) E.push({ id: 'eps' + p.pid, source: 'p-' + p.pid, target: 'p-' + t.pid, animated: true, style: { stroke: C.amber, strokeDasharray: '4 4' } }); } });
+    return { nodes: N, edges: E.filter(e => N.find(n => n.id === e.source) && N.find(n => n.id === e.target)) };
+  }, [st]);
+  return <div style={{ height: '100%', minHeight: 360 }} onWheel={e => e.stopPropagation()}><ReactFlow nodes={nodes} edges={edges} nodeTypes={ORCH_TYPES} fitView fitViewOptions={{ padding: 0.12 }} minZoom={0.2} colorMode="dark" proOptions={{ hideAttribution: true }} nodesConnectable={false} style={{ background: 'transparent' }}><Background color="rgba(110,150,190,.12)" gap={22} size={1} /><Controls showInteractive={false} position="bottom-right" /></ReactFlow></div>;
+}
+
+function GhostTab({ g, toast, narrow }) {
+  const st = g.state; const gv = (st && st.ghost) || {}; const runs = gv.runs || []; const latest = runs[0];
+  const [run, setRun] = React.useState(null); const [busy, setBusy] = React.useState(false);
+  const owner = userId === ownerId;
+  const go = async () => {
+    setRun({ status: 'reading GRIDPILOT digest', events: 0 });
+    try {
+      const { prompt } = await g.api('/api/ghost/prompt?local=1');
+      const chatId = await mana.mintChatId();
+      const h = await mana.ask(chatId, prompt, [], 'auto');
+      setRun({ status: 'Mana ghost is observing and designing v2', events: 0, chatId });
+      const t = setInterval(async () => { try { const p = await h.poll(); const tc = (p.events || []).filter(e => e.type === 'tool_call').slice(-1)[0]; setRun(r => r && { ...r, events: (p.events || []).length, last: tc ? (tc.name || 'tool') : r.last }); } catch (e) { } }, 2500);
+      const res = await h.finalResult(); clearInterval(t);
+      setRun({ status: 'submitting blueprint', chatId });
+      const r = await g.api('/api/ghost/blueprint', 'POST', { raw: res.text, source: 'mana-ui', chat_id: chatId });
+      toast(r.ok ? 'Ghost blueprint ' + r.id + ': ' + r.proposals + ' proposals' : r.message, r.ok ? 'ok' : 'err'); setRun(null);
+    } catch (e) { toast(e.message, 'err'); setRun(null); }
+  };
+  const decide = async (pid, a) => { setBusy(true); try { const r = await g.api('/api/ghost/proposals/' + pid + '/' + a, 'POST', {}); toast(r.message, r.ok ? 'ok' : 'err'); } catch (e) { toast(e.message, 'err'); } setBusy(false); };
+  const orch = async (oid, a) => { setBusy(true); try { const r = await g.api('/api/ghost/orch/' + oid + '/' + a, 'POST', {}); toast(r.message, r.ok ? 'ok' : 'err'); } catch (e) { toast(e.message, 'err'); } setBusy(false); };
+  const sevC = s => s === 'critical' ? C.red : s === 'warning' ? C.amber : C.cyan;
+  const kindC = { agent: C.cyan, detector: C.mint, scheduler: '#7aa2ff', policy: C.amber };
+  return <div className={'flex-1 min-h-0 flex flex-col' + (narrow ? ' overflow-auto' : '')} style={{ background: C.bg }}>
+    <link rel="stylesheet" href="https://esm.sh/@xyflow/react@12/dist/style.css" />
+    <div className="px-3 pt-3 flex items-start gap-3 flex-wrap">
+      <div className="min-w-0" style={{ flex: '1 1 420px' }}><Label color="#b49cff">Ghost architect · Mana agent</Label>
+        <div style={{ font: '600 14px ' + SANS, color: C.text, marginTop: 3 }}>Watches every loop, then designs orchestration v2: new agents, schedulers and detectors</div>
+        <div style={{ font: '11px/1.5 ' + SANS, color: C.mute, marginTop: 2 }}>It reads the live digest (agent runs, tool errors, incidents, work orders, per-GPU telemetry, finance, energy, security), proposes a blueprint, and GRIDPILOT dispatches only what you approve. Runs on demand and hourly from a Mana scheduler.</div></div>
+      <div className="flex flex-col items-end gap-1">
+        {owner && <Btn tone="primary" disabled={!!run} onClick={go}>{run ? 'Ghost running…' : 'Run Ghost Architect now'}</Btn>}
+        {run && <div className="gp-dot-live" style={{ font: '10px ' + MONO, color: '#b49cff' }}>{run.status}{run.events ? ' · ' + run.events + ' events' : ''}{run.last ? ' · ' + run.last : ''}</div>}
+        <div style={{ font: '9.5px ' + MONO, color: C.dim }}>v2 budget {gv.budget ? gv.budget.v2_runs_last_hour + '/' + gv.budget.max : '—'} agent runs per hour</div>
+      </div>
+    </div>
+    <div className="flex-1 min-h-0 grid gap-3 p-3" style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(250px, 300px) minmax(0, 1fr) minmax(300px, 360px)', gridAutoRows: narrow ? 'minmax(380px, auto)' : undefined }}>
+      <div className="flex flex-col gap-2 min-h-0 overflow-auto">
+        <Panel style={{ padding: 10 }}><Label color="#b49cff">Latest blueprint</Label>
+          {latest ? <><div style={{ font: '10px ' + MONO, color: C.dim, marginTop: 3 }}>{latest.id} · {latest.source} · {ago(latest.created)}{latest.data.chat_id ? ' · chat ' + String(latest.data.chat_id).slice(0, 10) : ''}</div>
+            <div style={{ font: '11.5px/1.55 ' + SANS, color: '#c7d6e6', marginTop: 5 }}>{latest.data.summary || (latest.status === 'unparsed' ? 'The ghost answered without a JSON blueprint.' : '')}</div></>
+            : <div style={{ font: '11px/1.5 ' + SANS, color: C.mute, marginTop: 4 }}>No blueprint yet. Run the ghost to get a v2 design.</div>}</Panel>
+        <Label>Observations</Label>
+        {latest && (latest.data.observations || []).map((o, i) => <div key={i} className="p-2.5 rounded-lg" style={{ background: C.p1, border: '1px solid ' + C.line, borderLeft: '2px solid ' + sevC(o.severity) }}>
+          <div className="flex justify-between gap-2"><span style={{ font: '600 9px ' + MONO, letterSpacing: '.12em', color: sevC(o.severity) }}>{(o.area || '').toUpperCase()} · {o.severity.toUpperCase()}</span></div>
+          <div style={{ font: '11.5px/1.45 ' + SANS, color: C.text, marginTop: 2 }}>{o.finding}</div><div style={{ font: '10px/1.45 ' + MONO, color: C.mute, marginTop: 2 }}>{o.evidence}</div></div>)}
+      </div>
+      <div className="flex flex-col min-h-0 rounded-xl overflow-hidden" style={{ background: 'radial-gradient(ellipse at 70% 30%, rgba(180,156,255,.06), transparent 60%), ' + C.p1, border: '1px solid ' + C.line }}>
+        <div className="flex items-center gap-3 px-3 py-2" style={{ borderBottom: '1px solid ' + C.line }}><Label color="#b49cff">Orchestration map · v1 → v2</Label>
+          <span className="ml-auto flex gap-3" style={{ font: '9.5px ' + MONO, color: C.dim, whiteSpace: 'nowrap' }}><span style={{ color: '#6f8299' }}>■ v1</span><span style={{ color: C.amber }}>┅ proposed</span><span style={{ color: C.cyan }}>■ v2 live</span></span></div>
+        <div className="flex-1 min-h-0"><OrchMap g={g} /></div>
+      </div>
+      <div className="flex flex-col gap-2 min-h-0 overflow-auto">
+        <Label>Proposals</Label>
+        {latest && (latest.data.proposals || []).map(p => <div key={p.pid} className="p-2.5 rounded-lg" style={{ background: C.p1, border: '1px solid ' + (p.status === 'proposed' ? 'rgba(255,187,85,.35)' : C.line), opacity: p.status === 'dismissed' ? 0.5 : 1 }}>
+          <div className="flex items-center gap-2"><span style={{ font: '600 8.5px ' + MONO, letterSpacing: '.12em', color: kindC[p.kind] }}>{p.kind.toUpperCase()}</span><span className="truncate" style={{ font: '600 12px ' + SANS, color: C.text }}>{p.name}</span><span className="ml-auto" style={{ font: '9.5px ' + MONO, color: p.status === 'dispatched' ? C.cyan : p.status === 'proposed' ? C.amber : C.dim }}>{p.status}</span></div>
+          <div style={{ font: '10.5px/1.45 ' + MONO, color: C.mute, marginTop: 3 }}>{p.kind === 'agent' ? (p.loop + ' · ' + p.trigger.type + (p.trigger.type === 'schedule' ? ' every ' + Math.round(p.trigger.every_s / 60) + 'm' : p.trigger.type === 'event' ? ' on ' + p.trigger.events.join(', ') : ' via ' + p.trigger.detector)) : p.kind === 'detector' ? (p.metric + ' ' + p.op + ' ' + p.threshold + ' for ' + p.for_ticks + ' ticks · ' + p.scope + ' → ' + p.action) : p.kind === 'scheduler' ? ('every ' + Math.round(p.every_s / 60) + ' min → ' + p.target) : p.change}</div>
+          {p.mission && <div style={{ font: '11px/1.45 ' + SANS, color: '#c7d6e6', marginTop: 4 }}>{p.mission}</div>}
+          <div style={{ font: '10.5px/1.45 ' + SANS, color: C.mute, marginTop: 4 }}><b style={{ color: C.text, fontWeight: 600 }}>Why:</b> {p.rationale}</div>
+          {p.expected_value && <div style={{ font: '10px/1.4 ' + MONO, color: C.mint, marginTop: 3 }}>+ {p.expected_value}</div>}{p.risk && <div style={{ font: '10px/1.4 ' + MONO, color: C.amber, marginTop: 1 }}>! {p.risk}</div>}
+          {p.problems && p.problems.length > 0 && <div style={{ font: '10px ' + MONO, color: C.red, marginTop: 3 }}>{p.problems.join('; ')}</div>}
+          {owner && p.status === 'proposed' && <div className="flex gap-2 mt-2"><Btn small tone="mint" disabled={busy} onClick={() => decide(p.pid, 'approve')}>{p.kind === 'policy' ? 'Accept as recommendation' : 'Approve & dispatch'}</Btn><Btn small disabled={busy} onClick={() => decide(p.pid, 'dismiss')}>Dismiss</Btn></div>}
+        </div>)}
+        <Label>Live v2 orchestration</Label>
+        {(gv.active || []).filter(o => o.status !== 'retired').length ? (gv.active || []).filter(o => o.status !== 'retired').map(o => <div key={o.id} className="p-2 rounded-lg" style={{ background: C.p1, border: '1px solid rgba(67,217,245,.25)' }}>
+          <div className="flex items-center gap-2"><span className={o.status === 'active' ? 'gp-dot-live' : ''} style={{ width: 6, height: 6, borderRadius: 6, background: o.status === 'active' ? C.cyan : C.amber }} /><span className="truncate" style={{ font: '600 11.5px ' + SANS, color: C.text }}>{o.name}</span><span className="ml-auto" style={{ font: '8.5px ' + MONO, color: kindC[o.kind], letterSpacing: '.1em' }}>{o.kind.toUpperCase()}</span></div>
+          <div style={{ font: '9.5px ' + MONO, color: C.dim, marginTop: 2 }}>{o.id} · {o.status}{o.runs ? ' · runs ' + o.runs : ''}{o.fires ? ' · fired ' + o.fires : ''}{o.agent_id ? ' · agent ' + String(o.agent_id).slice(0, 8) : o.kind === 'agent' ? ' · CREAO agent being created' : ''}</div>
+          {owner && o.status === 'active' && <div className="flex gap-2 mt-1.5">{o.kind === 'agent' && <Btn small disabled={busy} onClick={() => orch(o.id, 'run')}>Run now</Btn>}<Btn small tone="danger" disabled={busy} onClick={() => orch(o.id, 'retire')}>Retire</Btn></div>}</div>)
+          : <div style={{ font: '11px ' + SANS, color: C.mute }}>Nothing dispatched yet.</div>}
+        <Label>Findings from v2</Label>
+        {(gv.findings || []).slice(0, 10).map(f => <div key={f.id} className="p-2 rounded-lg" style={{ background: C.p1, border: '1px solid ' + C.line, borderLeft: '2px solid ' + sevC(f.severity) }}>
+          <div style={{ font: '600 11px/1.35 ' + SANS, color: C.text }}>{f.title}</div><div className="truncate" style={{ font: '9.5px ' + MONO, color: C.dim }}>{f.source} · {ago(f.ts)}</div>
+          {f.data && f.data.text && <div style={{ font: '10.5px/1.45 ' + SANS, color: C.mute, marginTop: 2 }}>{f.data.text}</div>}
+          {f.data && f.data.items && <div style={{ font: '10px ' + MONO, color: C.mute, marginTop: 2 }}>{f.data.items.slice(0, 6).map(x => x.target + ' ' + x.value).join(' · ')}</div>}</div>)}
+      </div>
+    </div>
+  </div>;
+}
+
 function ControlRoom({ g, setModal, toast, narrow }) {
   const [opts, setOpts] = React.useState({ mode: 'combined', density: 0.7, intensity: 1, paused: false, labels: false });
   const [sel, setSel] = React.useState(null); const [cmd, setCmd] = React.useState({ n: 0 }); const [strip, setStrip] = React.useState(true);
@@ -676,7 +889,7 @@ function ControlRoom({ g, setModal, toast, narrow }) {
   return <div className={'flex flex-col min-h-0 flex-1' + (narrow ? ' overflow-auto' : '')}>
     <div className={narrow ? 'flex flex-col' : 'flex flex-1 min-h-0'}>
       <div className="relative min-w-0" style={narrow ? { height: 460, flexShrink: 0 } : { flex: '1 1 auto' }}>
-        <DataCenterScene snapRef={g.snapRef} opts={opts} selected={sel} onSelect={onSelect} camCmd={cmd} />
+        <DataCenterScene snapRef={g.snapRef} gpusRef={g.gpusRef} opts={opts} selected={sel} onSelect={onSelect} camCmd={cmd} />
         <div className="absolute left-3 top-3 flex flex-col gap-2 pointer-events-auto" style={{ maxWidth: narrow ? 'calc(100% - 24px)' : undefined }}>
           <div className="flex rounded-full p-0.5" style={{ background: 'rgba(16,24,38,.85)', border: '1px solid ' + C.line2 }}>
             {['thermal', 'airflow', 'power', 'workload', 'combined'].map(m => <button key={m} onClick={() => set('mode', m)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '5px 11px', letterSpacing: '.02em', color: opts.mode === m ? '#04121a' : C.mute, background: opts.mode === m ? C.cyan : 'transparent' }}>{m[0].toUpperCase() + m.slice(1)}</button>)}
@@ -1129,7 +1342,7 @@ function UserDiv() {
       <div className="flex items-center gap-2"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke={C.cyan} strokeWidth="1.6" /><path d="M7 15l3-3 3 2 4-5" stroke={C.cyan} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /><circle cx="17" cy="9" r="1.6" fill={C.red} /></svg>
         <span style={{ font: '600 13px ' + SANS, letterSpacing: '.14em' }}>GRIDPILOT</span></div>
       <span className="gp-nw" style={{ font: '500 10.5px ' + MONO, color: C.mute, letterSpacing: '.12em' }}>{narrow ? '' : 'ATLAS COMPUTE · SFO-01 · '}<span style={{ color: g.conn === 'live' ? C.mint : C.amber }}>{g.conn === 'live' ? 'SIMULATION LIVE' : g.conn.toUpperCase()}</span></span>
-      <div className="flex gap-1 flex-wrap">{[['control', 'Control Room'], ['twin', narrow ? 'Twin' : 'Twin & reliability'], ['agents', narrow ? 'Agents' : 'Agent Operations'], ['finops', narrow ? 'Finance' : 'Finance desk'], ['settings', 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
+      <div className="flex gap-1 flex-wrap">{[['control', 'Control Room'], ['gpus', narrow ? 'GPUs' : 'GPU fleet'], ['twin', narrow ? 'Twin' : 'Twin & reliability'], ['agents', narrow ? 'Agents' : 'Agent Operations'], ['ghost', narrow ? 'Ghost' : 'Ghost architect'], ['finops', narrow ? 'Finance' : 'Finance desk'], ['settings', narrow ? 'Setup' : 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
       <div className="ml-auto flex items-center flex-wrap gap-x-4 gap-y-1 gp-hdr" style={{ font: '500 10.5px ' + MONO, color: C.mute }}>
         <span className="gp-nw">HEALTH <b style={{ color: health[1] }}>{health[0]}</b></span>
         <span className="gp-nw">INCIDENT <b style={{ color: inc && inc.state !== 'CLOSED' ? C.red : C.mint }}>{inc && inc.state !== 'CLOSED' ? inc.severity + ' ' + inc.id : 'NONE'}</b></span>
@@ -1155,6 +1368,8 @@ function UserDiv() {
     {tab === 'finops' && <FinanceDesk g={g} toast={toast} narrow={W < 860} />}
     {tab === 'agents' && <AgentOps g={g} narrow={W < 980} />}
     {tab === 'twin' && <TwinTab g={g} toast={toast} narrow={W < 980} />}
+    {tab === 'gpus' && <GpuFleet g={g} narrow={W < 980} />}
+    {tab === 'ghost' && <GhostTab g={g} toast={toast} narrow={W < 980} />}
     {tab === 'settings' && <Settings g={g} toast={toast} />}
     <CallOverlay g={g} />
     {modal && modal.kind === 'diff' && <Modal wide title={'Configuration changes' + (plan ? ' · ' + plan.plan_id + ' v' + plan.version : '')} onClose={() => setModal(null)}>

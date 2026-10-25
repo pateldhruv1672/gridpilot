@@ -35,7 +35,7 @@ OPTIONS = {}           # incident -> list of evaluated options (summaries) for c
 DIRTY = {"v": True}
 ENG.notify = lambda: DIRTY.__setitem__("v", True)
 import finance_desk as FD
-import twin as TW, predict as PR, reliability as RL
+import twin as TW, predict as PR, reliability as RL, gpus as GPUS, ghost as GHM
 DESK = FD.Desk(ENG.db, notify=lambda: DIRTY.__setitem__("v", True), event=ENG.event)
 ENG.desk = DESK
 if not ENG.db.one("select id from ap_decisions where kind='recommendation' limit 1"): DESK.autonomous_pass()
@@ -56,6 +56,14 @@ def _rel_hook(r, st, data):
         REL.transition(wo, "AWAITING_PLAN", "backend", "CREAO run %s finished (%s) without proposing a plan; operator can re-run planning" % (r["id"], st))
 ENG.hooks = [_rel_hook]
 TICKN = {"n": 0}
+FLEET = GPUS.Fleet()
+EVQ = []
+_orig_event = ENG.event
+def _event_tap(inc_id, typ, actor, data=None):
+    r = _orig_event(inc_id, typ, actor, data)
+    if not typ.startswith(("v2_", "ghost_")) and len(EVQ) < 200: EVQ.append((typ, data or {}))
+    return r
+ENG.event = _event_tap
 
 def preds_payload():
     out = {}
@@ -153,7 +161,7 @@ def full_state():
     return {"incident": incident_detail(inc), "incidents": incs, "events": evs, "finance": finance_summary(), "integrations": integrations_status(),
             "series": list(ENG.series), "config_log": CS.log(15), "thresholds": S.THRESH, "speed": ENG.speed, "paused": ENG.paused,
             "fail_armed": ENG.fail_armed, "sim_t": round(SIM.t, 1), "evidence": EVIDENCE, "specialists": specialist_runs(), "desk": DESK.snapshot(),
-            "work_orders": REL.list(), "pm_proof": PRED.proof(), "twin": twin_payload(), "agent_summary": agent_summary(), "loops": loops()}
+            "work_orders": REL.list(), "pm_proof": PRED.proof(), "twin": twin_payload(), "agent_summary": agent_summary(), "loops": loops(), "ghost": GHOST.view(), "gpus": FLEET.payload()}
 
 def specialist_runs():
     out = []
@@ -190,6 +198,14 @@ async def sim_loop():
                               "policy": "autonomous within bounds: peak shaving only above 40% SoC reserve, charge off-peak"})
                 for aid, p in PRED.observe(TWIN): ENG.spawn(REL.on_alert(aid, p))
                 REL.tick()
+                if TICKN["n"] % 2 == 0:
+                    FLEET.compute(SIM)
+                    try: await GHOST.detect_tick()
+                    except Exception: traceback.print_exc()
+                ENG.spawn(GHOST.schedule_tick())
+                while EVQ:
+                    typ, dat = EVQ.pop(0)
+                    if any(o["kind"] == "agent" and o["status"] == "active" and o["spec"].get("trigger", {}).get("type") == "event" for o in GHOST.active()): ENG.spawn(GHOST.on_event(typ, dat))
                 if int(SIM.t) % 2 == 0 or True:
                     for i in range(64):
                         rid = S.rack_id(i // 8, i % 8)
@@ -198,7 +214,7 @@ async def sim_loop():
             snap = SIM.snapshot(field=True)
             inc = ENG.status()
             TICKN["n"] += 1
-            msg = {"type": "tick", "snap": snap, "twin": twin_payload() if TICKN["n"] % 4 == 0 else None, "series_point": ENG.series[-1] if ENG.series else None,
+            msg = {"type": "tick", "snap": snap, "twin": twin_payload() if TICKN["n"] % 4 == 0 else None, "gpus": FLEET.payload() if TICKN["n"] % 4 == 2 else None, "series_point": ENG.series[-1] if ENG.series else None,
                    "incident_brief": {"id": inc["id"], "state": inc["state"], "rack": inc["rack"]} if inc else None, "speed": ENG.speed, "paused": ENG.paused}
             payload = E.jd(msg)
             full = E.jd({"type": "state", "state": full_state()}) if DIRTY["v"] else None
@@ -232,6 +248,45 @@ async def ingress_refresher():
 
 # ---------------------------------------------------------------- routes
 routes = web.RouteTableDef()
+
+class _NS(dict):
+    def __getitem__(self, k): return globals()[k] if k in ("ENG", "agent_summary", "REL", "FLEET", "TWIN", "PRED", "DESK", "build_trace", "run_ap_review") else dict.__getitem__(self, k)
+GHOST = GHM.Ghost(_NS(notify=lambda: DIRTY.__setitem__("v", True), start_agent=lambda *a: start_fin_agent(*a)))
+
+@routes.get("/api/gpus/rack/{rid}")
+async def api_gpu_rack(req):
+    viewer(req)
+    if FLEET.last is None: FLEET.compute(SIM)
+    try: return jresp(FLEET.rack(req.match_info["rid"].upper()))
+    except Exception as e: return jresp({"error": str(e)}, 400)
+
+@routes.get("/api/ghost/digest")
+async def api_ghost_digest(req): owner_only(req); return jresp(GHOST.digest())
+
+@routes.get("/api/ghost/prompt")
+async def api_ghost_prompt(req):
+    owner_only(req); local = req.query.get("local") == "1"
+    return jresp({"prompt": GHOST.prompt("http://127.0.0.1:%d" % PORT if local else None, OWNER if local else None)})
+
+@routes.post("/api/ghost/blueprint")
+async def api_ghost_blueprint(req):
+    owner_only(req); b = await req.json()
+    return jresp(GHOST.ingest(b.get("raw") or b.get("blueprint"), str(b.get("source") or "mana")[:40], {"chat_id": b.get("chat_id"), "model": b.get("model")}))
+
+@routes.post("/api/ghost/proposals/{pid}/{action}")
+async def api_ghost_decide(req):
+    uid = owner_only(req); a = req.match_info["action"]
+    if a not in ("approve", "dismiss"): return jresp({"ok": False, "message": "unknown action"}, 400)
+    ok, msg = await GHOST.decide(req.match_info["pid"], a == "approve", "operator:" + uid[:8])
+    return jresp({"ok": ok, "message": msg}, 200 if ok else 409)
+
+@routes.post("/api/ghost/orch/{oid}/{action}")
+async def api_ghost_orch(req):
+    uid = owner_only(req); a = req.match_info["action"]; oid = req.match_info["oid"]
+    if a == "retire": GHOST.retire(oid, "operator:" + uid[:8]); return jresp({"ok": True, "message": "retired"})
+    if a == "run":
+        ref, err = await GHOST.run_agent(oid, {"type": "manual", "by": "operator"}); return jresp({"ok": bool(ref), "message": ("run " + ref) if ref else err})
+    return jresp({"ok": False, "message": "unknown action"}, 400)
 
 @routes.get("/health")
 async def health(req): return jresp({"ok": True, "sim_t": round(SIM.t, 1)})
@@ -500,30 +555,11 @@ async def api_inv_action(req):
 async def api_payrun(req):
     uid = owner_only(req); return jresp({"ok": True, "paid": DESK.payment_run(uid)})
 
-@routes.post("/api/finance/ap-review")
-async def api_ap_review(req):
-    owner_only(req)
-    det = DESK.autonomous_pass()
-    cfg = ENG.creao_config()
-    if not cfg["cli"] or not cfg["base"]: return jresp({"ok": True, "deterministic": det, "agent": None, "message": "CREAO key not available; deterministic pass only"})
-    local = "AP-%s" % secrets.token_hex(4); token = secrets.token_urlsafe(24)
-    ENG.tokens[token] = {"incident_id": None, "task": "ap_review", "run_ref": local, "expires": time.time() + 3600, "allowed": FIN_TOOLS}; ENG.db.set("tool_tokens", ENG.tokens)
-    request = {"gridpilot_api": cfg["base"] + "/tools/creao", "tool_token": token, "task": "ap_review", "note": "Review every pending invoice and recommend a decision for each."}
-    ENG.db.ex("insert into agent_runs values(?,?,?,?,?,?,?,?,?)", (local, "creao-cli", None, None, "specialist:ap_analyst", "creating_agent", time.time(), None,
-              E.jd({"specialist": {"kind": "ap_analyst", "name": "GRIDPILOT AP Analyst", "mission": "AP review", "trigger": "AP review requested"}, "requested_by": "operator", "request": {**request, "tool_token": "[redacted]"}})))
-    ENG.pending_inputs[local] = request
-    key, aid = await ENG.ensure_agent("ap_analyst", "GRIDPILOT AP Analyst", FIN_TEXT)
-    d = json.loads(ENG.db.one("select data from agent_runs where id=?", (local,))["data"]); d["agent_key"] = key
-    ENG.db.ex("update agent_runs set data=?, status=? where id=?", (E.jd(d), "awaiting_agent" if not aid else "starting", local))
-    if aid: await ENG._start_cli_run(local, aid)
-    DIRTY["v"] = True
-    return jresp({"ok": True, "deterministic": det, "agent_run": local})
-
 async def start_fin_agent(kind, name, text, tools, request, meta):
     cfg = ENG.creao_config()
     if not cfg["cli"] or not cfg["base"]: return None, "CREAO key not available"
     local = "AP-%s" % secrets.token_hex(4); token = secrets.token_urlsafe(24)
-    ENG.tokens[token] = {"incident_id": None, "task": kind, "run_ref": local, "expires": time.time() + 3600, "allowed": tools, "work_order": request.get("work_order")}; ENG.db.set("tool_tokens", ENG.tokens)
+    ENG.tokens[token] = {"incident_id": None, "task": kind, "run_ref": local, "expires": time.time() + 3600, "allowed": tools, "work_order": request.get("work_order"), "orch_id": request.get("orch_id")}; ENG.db.set("tool_tokens", ENG.tokens)
     request = {"gridpilot_api": cfg["base"] + "/tools/creao", "tool_token": token, **request}
     ENG.db.ex("insert into agent_runs values(?,?,?,?,?,?,?,?,?)", (local, "creao-cli", None, None, "specialist:" + kind, "creating_agent", time.time(), None,
               E.jd({"specialist": {"kind": kind, "name": name, "mission": meta.get("mission", kind), "trigger": meta.get("trigger", "operator")}, "requested_by": "operator", **meta, "request": {**request, "tool_token": "[redacted]"}})))
@@ -555,6 +591,18 @@ async def api_inv_new(req):
     res = dict(DESK.autonomous_pass("agent:ap")).get(iid)
     a = DESK.analyze(iid); DIRTY["v"] = True
     return jresp({"ok": True, "invoice_id": iid, "status": res, "decision": a["decision"], "amount": a["amount"], "reason": a["reason"], "message": "%s ingested · %s" % (iid, (res or "").replace("_", " "))})
+
+async def run_ap_review():
+    det = DESK.autonomous_pass()
+    cfg = ENG.creao_config()
+    if not cfg["cli"] or not cfg["base"]: return {"ok": True, "deterministic": det, "agent": None, "message": "CREAO key not available; deterministic pass only"}
+    local, err = await start_fin_agent("ap_analyst", "GRIDPILOT AP Analyst", FIN_TEXT, FIN_TOOLS, {"task": "ap_review", "note": "Review every pending invoice and recommend a decision for each."}, {"mission": "AP review", "trigger": "AP review requested"})
+    return {"ok": bool(local), "deterministic": det, "agent_run": local, "message": err}
+
+@routes.post("/api/finance/ap-review")
+async def api_ap_review(req):
+    owner_only(req)
+    return jresp(await run_ap_review())
 
 @routes.get("/api/finance/summary")
 async def api_fin(req): owner_only(req); return jresp(finance_summary())
@@ -967,6 +1015,7 @@ async def creao_tool(req):
     ok = 1
     try:
         if tok.get("task") == "reliability": res = await REL.tool(tool, args, tok.get("work_order"), actor)
+        elif str(tok.get("task", "")).startswith("v2_"): res = await GHOST.tool(tool, args, actor, tok.get("orch_id"))
         else: res = await tool_dispatch(tool, args, tok["incident_id"], actor, "creao")
     except web.HTTPException: raise
     except Exception as e: ok = 0; res = {"error": str(e)[:500]}

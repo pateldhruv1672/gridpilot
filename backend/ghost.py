@@ -267,7 +267,7 @@ class Ghost:
                 hit = v > sp["threshold"] if sp["op"] == ">" else v < sp["threshold"]
                 st[key] = st.get(key, 0) + 1 if hit else 0
                 if st[key] == sp["for_ticks"]: fired.append((key, v))
-            if not fired: continue
+            if not fired or time.time() - (o.get("last_fire") or 0) < 600: continue
             name = lambda k: gid(k) if sp["metric"].startswith("gpu_") else (S.rack_id(k // 8, k % 8) if sp["metric"].startswith("rack_") else str(k))
             items = [{"target": name(k), "value": round(v, 2)} for k, v in fired[:12]]
             self.db.ex("insert into findings(ts,source,severity,title,data) values(?,?,?,?,?)", (time.time(), "detector:" + o["id"], sp["severity"],
@@ -305,5 +305,10 @@ class Ghost:
         return {"error": "unknown tool"}
 
     def view(self):
-        return {"runs": self.runs(6), "active": self.active(), "findings": [dict(f, data=json.loads(f["data"])) for f in self.db.all("select * from findings order by id desc limit 25")],
+        act = self.active()
+        for o in act:
+            if o["kind"] == "agent" and o.get("agent_key"):
+                r = self.db.one("select status, agent_id from specialists where key=?", (o["agent_key"],))
+                if r: o["agent_status"] = r["status"]; o["agent_id"] = r["agent_id"] or o.get("agent_id")
+        return {"runs": self.runs(6), "active": act, "findings": [dict(f, data=json.loads(f["data"])) for f in self.db.all("select * from findings order by id desc limit 25")],
                 "budget": {"v2_runs_last_hour": len([t for t in self.v2_runs if time.time() - t < 3600]), "max": MAX_V2_RUNS_PER_HOUR}}
