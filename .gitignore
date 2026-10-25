@@ -3,3 +3,6 @@ config-repo/
 __pycache__/
 *.pyc
 .env
+
+stdb/node_modules/
+stdb/dist/

@@ -1,0 +1,11 @@
+{
+  "database": "gridpilot",
+  "server": "maincloud",
+  "module-path": "./stdb",
+  "generate": [
+    {
+      "language": "typescript",
+      "out-dir": "./frontend/module_bindings"
+    }
+  ]
+}

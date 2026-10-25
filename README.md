@@ -105,3 +105,20 @@ Local mode binds to 127.0.0.1 and treats you as the operator. Inside Mana the ba
 ## Responsible use
 
 Human approval is required for anything that costs money, touches a protected customer, or moves cash. Voice approval works with no screen: GRIDPILOT itself phones the registered on-call engineer, reads the exact plan version back, and a clear spoken yes approves that version (ambiguous answers never do). The outbound call holds a per-call token, the backend re-checks version, window and live state, and the engineer's words are stored with the approval. Visitors get a read-only live view. Calls go only to a consenting, registered operator.
+
+## SpacetimeDB live state (maincloud/gridpilot)
+
+| Setting | Value |
+|---|---|
+| Host | https://maincloud.spacetimedb.com |
+| Database | gridpilot |
+| Module | `stdb/src/index.ts` (TypeScript, spacetimedb 2.13) |
+| Config | `spacetime.json` (database, server, module-path and a TypeScript **generate** target → `frontend/module_bindings`) |
+
+- **Tables (public, read-only for clients):** `rack`, `cooling_unit`, `facility_summary`, `thermal_field`, `incident`, `plan`, `audit_event`. Private: `writer`, `admin`.
+- **Writes:** one `publish_tick` reducer call per second from the Python backend worker (`backend/stdb.py`) carrying the real simulator snapshot plus any incident / plan / audit changes. Every mutating reducer checks the caller against `writer`; only the database owner can `grant_writer` / `revoke_writer`. Anonymous visitors are refused (`read-only: this identity is not an authorized GridPilot writer`).
+- **Worker credential:** a dedicated SpacetimeDB identity whose token lives only in Mana's server-side secrets (`SPACETIMEDB_WORKER_TOKEN`). The backend calls through Mana's symbolic proxy, which injects the token; it never enters the process or the repo.
+- **Dashboard:** subscribes with the generated bindings (`tools/embed_bindings.py` bundles them into the user_div). 3D racks, heatmap, cooling units, facility metrics and incident state/plans render from the subscription; the header shows `SPACETIMEDB LIVE · #seq`. Approvals, executions, calls and finance detail still come from the backend until they are migrated.
+- **Unchanged:** Python thermal model, CREAO and Cartesia integrations, git configuration store, audit log in the backend DB (mirrored, last 600 events).
+- **Regenerate bindings:** `spacetime generate --yes` (reads `spacetime.json`), then `python tools/embed_bindings.py`.
+- **Acceptance test (2026-10-24):** two independent clients (the Mana dashboard tab and a separate subscriber) saw identical C02 values at the same publish sequence: repair #98 nominal 90%, #102 95%; degrade #124 degraded 33% / 26.6 °C, #127 31% / 27.2 °C.

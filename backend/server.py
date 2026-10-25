@@ -5,6 +5,7 @@ from collections import deque
 from aiohttp import web, WSMsgType
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sim as S, configstore as CS, engine as E, finance as FIN, policy as POL, voice as V, integrations as IX
+import stdb as STDB
 LOCAL = os.environ.get("GRIDPILOT_LOCAL") == "1"
 try:
     from env import get_user_id          # Mana sandbox
@@ -29,6 +30,7 @@ def boot_sim():
 
 SIM = boot_sim()
 ENG = E.Engine(SIM, OWNER)
+STDBP = STDB.Publisher(ENG, SIM)
 CLIENTS = set(); TICKETS = {}
 HIST = {S.rack_id(i // 8, i % 8): deque(maxlen=90) for i in range(64)}
 OPTIONS = {}           # incident -> list of evaluated options (summaries) for comparison
@@ -212,6 +214,8 @@ async def sim_loop():
                         if not HIST[rid] or SIM.t - HIST[rid][-1][0] >= 2:
                             HIST[rid].append((round(SIM.t, 1), round(float(SIM.gpu_t[i]), 1), round(float(SIM.inlet[i]), 1), round(float(SIM.P[i]), 2)))
             snap = SIM.snapshot(field=True)
+            try: STDBP.maybe_publish(snap)
+            except Exception: traceback.print_exc()
             inc = ENG.status()
             TICKN["n"] += 1
             msg = {"type": "tick", "snap": snap, "twin": twin_payload() if TICKN["n"] % 4 == 0 else None, "gpus": FLEET.payload() if TICKN["n"] % 4 == 2 else None, "series_point": ENG.series[-1] if ENG.series else None,
@@ -303,6 +307,14 @@ async def api_reasoning(req):
         last = next((c for c in out if c["run_ref"] == r["id"]), None)
         runs.append({**r, "agent": r["task"].replace("specialist:", "").replace("_", " "), "calls": sum(1 for c in out if c["run_ref"] == r["id"]), "last_call_ts": last["ts"] if last else None})
     return jresp({"runs": runs, "calls": out[::-1], "now": time.time()})
+
+@routes.get("/api/stdb/status")
+async def api_stdb_status(req):
+    viewer(req); return jresp(STDBP.status())
+
+@routes.post("/api/stdb/enabled")
+async def api_stdb_enabled(req):
+    owner_only(req); b = await req.json(); STDBP.enabled = bool(b.get("enabled", True)); return jresp(STDBP.status())
 
 @routes.get("/api/approvals")
 async def api_approvals(req):
@@ -1319,7 +1331,7 @@ async def on_start(app):
     loop = asyncio.get_event_loop()
     try: await asyncio.to_thread(ENG.creao_config)
     except Exception: traceback.print_exc()
-    for c in (sim_loop(), ENG.creao_poller(), ENG.cli_poller(), V.poller(ENG), ingress_refresher()):
+    for c in (sim_loop(), ENG.creao_poller(), ENG.cli_poller(), V.poller(ENG), ingress_refresher(), STDBP.run()):
         t = loop.create_task(c); ENG.bg.add(t)
 
 async def local_index(req): return web.FileResponse(os.path.join(CODE_ROOT, "frontend", "local", "index.html"))
