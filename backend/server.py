@@ -49,7 +49,15 @@ def boot_twin():
         try: return pickle.load(open(p, "rb"))
         except Exception: traceback.print_exc()
     t = TW.Twin(); t.t = SIM.t; t._last_series = SIM.t - 99; return t
-TWIN = boot_twin(); PRED = PR.Predictor()
+TWIN = boot_twin()
+def boot_pred():
+    """Restore predictor history and episodes so a backend restart does not erase the evidence (or miss a failure)."""
+    try:
+        p = pickle.load(open(os.path.join(STATE, "pred.pkl"), "rb"))
+        if isinstance(p, PR.Predictor) and getattr(p, "_v", 0) == 2: return p
+    except Exception: pass
+    p = PR.Predictor(); p._v = 2; return p
+PRED = boot_pred()
 async def _start_agent(*a): return await start_fin_agent(*a)
 REL = RL.Reliability(ENG, TWIN, PRED, _start_agent, lambda: DIRTY.__setitem__("v", True))
 def _rel_hook(r, st, data):
@@ -251,6 +259,7 @@ async def sim_loop():
             if time.time() - last_save > 15:
                 last_save = time.time(); pickle.dump(SIM, open(os.path.join(STATE, "sim.pkl.tmp"), "wb")); os.replace(os.path.join(STATE, "sim.pkl.tmp"), os.path.join(STATE, "sim.pkl"))
                 pickle.dump(TWIN, open(os.path.join(STATE, "twin.pkl.tmp"), "wb")); os.replace(os.path.join(STATE, "twin.pkl.tmp"), os.path.join(STATE, "twin.pkl"))
+                pickle.dump(PRED, open(os.path.join(STATE, "pred.pkl.tmp"), "wb")); os.replace(os.path.join(STATE, "pred.pkl.tmp"), os.path.join(STATE, "pred.pkl"))
                 ENG.db.set("cost_accum", ENG.cost)
         except Exception:
             traceback.print_exc()
