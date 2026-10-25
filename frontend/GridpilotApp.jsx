@@ -1885,6 +1885,8 @@ function FinanceDesk({ g, toast, narrow }) {
   const [groupBy, setGroupBy] = React.useState('service'); const [askQ, setAskQ] = React.useState(''); const [newInv, setNewInv] = React.useState(false);
   const [res, setRes] = React.useState(null); const [verified, setVerified] = React.useState(false);
   React.useEffect(() => { setVerified(false); setNote(''); }, [sel]);
+  const keepSel = React.useRef(false);
+  React.useEffect(() => { if (keepSel.current) { keepSel.current = false; return; } setSel(null); }, [sub]);
   if (!D) return <div className="flex-1 p-6" style={{ background: C.bg, color: C.mute, font: '12px ' + SANS }}>Loading finance desk…</div>;
   const decide = async (iid, action, body, okMsg) => {
     setBusy(true); setSel(iid);
@@ -1895,11 +1897,11 @@ function FinanceDesk({ g, toast, narrow }) {
   const act = async (path, body, okMsg) => { setBusy(true); try { const r = await g.api(path, 'POST', body || {}); toast(r.message || okMsg, r.ok === false ? 'err' : 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(false); };
   const pending = D.invoices.filter(i => !['paid', 'disputed_resolved'].includes(i.status));
   const approved = D.invoices.filter(i => ['approved', 'partially_disputed'].includes(i.status));
-  const inv = D.invoices.find(i => i.id === sel) || D.invoices.find(i => !['paid', 'disputed_resolved', 'approved'].includes(i.status)) || pending[0];
+  const inv = D.invoices.find(i => i.id === sel) || (sub === 'approved' ? D.invoices.find(i => ['approved', 'paid', 'disputed_resolved'].includes(i.status)) : D.invoices.find(i => ['received', 'awaiting_controller'].includes(i.status)) || D.invoices.find(i => !['paid', 'disputed_resolved', 'approved'].includes(i.status))) || pending[0];
   const agentRecs = (i) => i.decisions.filter(d => d.kind === 'agent_recommendation');
   const drafts = (i) => i.decisions.filter(d => d.kind === 'dispute_draft');
   const apRun = (st.specialists || []).find(s => s.kind === 'ap_analyst');
-  const tabs = [['inbox', 'Inbox'], ['explorer', 'Cost explorer'], ['incidents', 'Incident costs'], ['ledger', 'Ledger'], ['proof', 'Controls & proof']];
+  const tabs = [['inbox', 'Inbox'], ['approved', 'Approved'], ['explorer', 'Cost explorer'], ['incidents', 'Incident costs'], ['ledger', 'Ledger'], ['proof', 'Controls & proof']];
   const chip = (txt, color) => <span style={{ font: '600 9.5px ' + MONO, color, border: '1px solid ' + color + '66', borderRadius: 4, padding: '1px 6px', whiteSpace: 'nowrap' }}>{txt}</span>;
   const dec = (d) => ({ approve: C.mint, short_pay: C.amber, dispute: C.red, hold: C.red }[d] || C.mute);
   // explorer data
@@ -1918,6 +1920,11 @@ function FinanceDesk({ g, toast, narrow }) {
   const plan = inc && inc.plans && inc.plans.slice(-1)[0]; const b52 = D.budgets['5200'];
   const needs = D.invoices.filter(x => !['paid', 'disputed_resolved', 'approved'].includes(x.status));
   const ready = D.invoices.filter(x => x.status === 'approved');
+  const qNew = D.invoices.filter(x => ['received', 'awaiting_controller'].includes(x.status));
+  const qHold = D.invoices.filter(x => x.status === 'held');
+  const qDisp = D.invoices.filter(x => ['dispute_drafted', 'disputed', 'partially_disputed'].includes(x.status));
+  const qPaid = D.invoices.filter(x => x.status === 'paid'); const qResolved = D.invoices.filter(x => x.status === 'disputed_resolved');
+  const APPROVED_ST = ['approved', 'paid', 'disputed_resolved'];
   const closed = D.invoices.filter(x => ['paid', 'disputed_resolved'].includes(x.status));
   const queueUsd = ready.reduce((a, x) => a + (x.analysis ? x.analysis.amount : x.amount), 0);
   const alerts = D.alerts.filter(a => a.status === 'open');
@@ -1947,9 +1954,12 @@ function FinanceDesk({ g, toast, narrow }) {
       <span style={{ width: 6, height: 6, borderRadius: 6, marginTop: 6, flexShrink: 0, background: a.severity === 'high' ? C.red : C.amber }} />
       <div className="min-w-0 flex-1"><div style={{ font: '600 11px ' + MONO, color: a.severity === 'high' ? C.red : C.amber, letterSpacing: '.06em' }}>{a.kind.replace(/_/g, ' ').toUpperCase()}</div><div style={{ font: '12px/1.55 ' + SANS, color: C.text, marginTop: 2 }}>{a.text}</div></div>
       {a.data && a.data.invoice_id && <Btn small onClick={() => { setSel(a.data.invoice_id); setSub('inbox'); }}>Open</Btn>}</div>)}</div>}
-    {sub === 'inbox' && <div className={'flex-1 min-h-0 grid' + (narrow ? ' overflow-auto' : '')} style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(280px, 340px) minmax(0, 1fr)', gridAutoRows: narrow ? 'max-content' : undefined }}>
+    {(sub === 'inbox' || sub === 'approved') && <div className={'flex-1 min-h-0 grid' + (narrow ? ' overflow-auto' : '')} style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(280px, 340px) minmax(0, 1fr)', gridAutoRows: narrow ? 'max-content' : undefined }}>
       <div className="overflow-auto" style={narrow ? { maxHeight: 300, borderBottom: '1px solid ' + C.line } : { borderRight: '1px solid ' + C.line }}>
-        {group('Needs your decision', needs)}{group('Ready to pay', ready)}{group('Closed', closed)}
+        {sub === 'inbox' ? <>{group('New · to approve', qNew)}{group('On hold · verify first', qHold)}{group('Disputes', qDisp)}
+          {!qNew.length && !qHold.length && !qDisp.length && <div className="px-4 py-6" style={{ font: '12px ' + SANS, color: C.mute }}>Inbox clear. Approved invoices are in the Approved tab.</div>}</>
+          : <>{group('Ready to pay', ready)}{group('Paid', qPaid)}{group('Resolved disputes', qResolved)}
+          {!ready.length && !qPaid.length && !qResolved.length && <div className="px-4 py-6" style={{ font: '12px ' + SANS, color: C.mute }}>Nothing approved yet.</div>}</>}
         {apRun && <div className="px-4 py-3" style={{ font: '10px ' + MONO, color: C.dim }}>CREAO AP Analyst · {apRun.status}{apRun.creao_run_id ? ' · run ' + apRun.creao_run_id.slice(0, 8) : ''}</div>}
       </div>
       <div className={narrow ? 'p-4' : 'overflow-auto'}>{inv ? (() => { const a = inv.analysis; const rec = agentRecs(inv).slice(-1)[0]; const fails = a ? a.checks.filter(c => !c.ok) : []; const passes = a ? a.checks.filter(c => c.ok) : []; const open = !['paid', 'disputed_resolved', 'approved'].includes(inv.status); const qa = inv.decisions.filter(d => d.kind === 'question' || d.kind === 'explanation');
@@ -1973,7 +1983,7 @@ function FinanceDesk({ g, toast, narrow }) {
               <Btn disabled={busy} onClick={() => decide(inv.id, 'hold', { note }, 'Held')}>Hold</Btn></div>}
             {open && a.decision === 'hold' && <label className="flex items-center gap-2 mt-2 cursor-pointer" style={{ font: '11.5px ' + SANS, color: C.mute }}><input type="checkbox" checked={verified} onChange={e => setVerified(e.target.checked)} /> I called {inv.vendor_name} at the number on file and confirmed this invoice and its bank details. Required to release a held invoice.</label>}
             {open && a.decision === 'dispute' && <div style={{ font: '11px ' + SANS, color: C.dim, marginTop: 6 }}>The matcher recommends a dispute. <b style={{ color: C.mute }}>Dispute</b> pays the contract amount and disputes the rest; <b style={{ color: C.mute }}>Approve anyway</b> pays in full and needs a reason for the audit trail.</div>}
-            {res && res.iid === inv.id && <div className="mt-2 px-3 py-2 rounded-lg" style={{ font: '12px ' + SANS, color: res.ok ? C.mint : C.red, background: res.ok ? 'rgba(79,224,165,.07)' : 'rgba(255,89,110,.07)', border: '1px solid ' + (res.ok ? 'rgba(79,224,165,.3)' : 'rgba(255,89,110,.3)') }}>{res.ok ? '✓ ' : '✕ '}{res.text}{res.ok ? ' · status now ' + inv.status.replace(/_/g, ' ') : ''}</div>}
+            {res && res.iid === inv.id && <div className="mt-2 px-3 py-2 rounded-lg" style={{ font: '12px ' + SANS, color: res.ok ? C.mint : C.red, background: res.ok ? 'rgba(79,224,165,.07)' : 'rgba(255,89,110,.07)', border: '1px solid ' + (res.ok ? 'rgba(79,224,165,.3)' : 'rgba(255,89,110,.3)') }}>{res.ok ? '✓ ' : '✕ '}{res.text}{res.ok ? ' · status now ' + inv.status.replace(/_/g, ' ') : ''}{res.ok && APPROVED_ST.includes(inv.status) && sub === 'inbox' ? <button onClick={() => { keepSel.current = true; setSub('approved'); }} style={{ marginLeft: 8, color: C.cyan, textDecoration: 'underline', font: 'inherit' }}>moved to Approved</button> : null}</div>}
           </div>}
           <div><Label>Invoice lines</Label><div className="mt-1.5">{inv.lines.map((l, k) => <div key={k} className="grid gap-3 py-1.5" style={{ gridTemplateColumns: 'minmax(0,1fr) auto auto', borderBottom: '1px solid ' + C.line, font: '11.5px ' + MONO }}><span className="truncate" style={{ color: C.text }}>{l.sku}</span><span style={{ color: C.mute }}>{l.qty.toLocaleString()} × {fmt$(l.rate)}</span><span style={{ color: C.text, minWidth: 80, textAlign: 'right' }}>{fmt$(l.usd)}</span></div>)}</div></div>
           {a && <div><Label>Three-way match · contract × meter × invoice</Label><div className="mt-1.5 flex flex-col">
