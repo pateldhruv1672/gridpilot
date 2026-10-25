@@ -1,0 +1,48 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0}
+body{width:1500px;height:1000px;overflow:hidden;background:#070B13;font-family:Inter,sans-serif;color:#E6EEF7}
+.bg{position:absolute;inset:0;background:
+ radial-gradient(900px 600px at 78% 55%,rgba(67,217,245,.13),transparent 60%),
+ radial-gradient(600px 420px at 70% 78%,rgba(255,140,80,.10),transparent 65%),#070B13}
+.grid{position:absolute;inset:0;background-image:linear-gradient(rgba(110,150,190,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(110,150,190,.06) 1px,transparent 1px);background-size:50px 50px;mask-image:linear-gradient(90deg,#000 0%,transparent 55%)}
+.scene{position:absolute;right:-120px;top:205px;width:930px;height:540px;border-radius:18px;overflow:hidden;
+ border:1px solid rgba(110,150,190,.28);box-shadow:0 40px 120px rgba(0,0,0,.6),0 0 0 1px rgba(67,217,245,.06);
+ transform:perspective(2200px) rotateY(-9deg) rotateX(3deg);transform-origin:left center}
+.scene img{width:100%;height:100%;object-fit:cover;object-position:30% 50%}
+.scene:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,#070B13 0%,rgba(7,11,19,.4) 12%,transparent 30%),linear-gradient(0deg,rgba(7,11,19,.85) 0%,transparent 22%)}
+.left{position:absolute;left:84px;top:96px;width:640px}
+.eyebrow{font:600 17px "IBM Plex Mono";letter-spacing:.22em;color:#43D9F5;text-transform:uppercase}
+.brand{display:flex;align-items:center;gap:22px;margin-top:30px}
+.mark{width:84px;height:84px;border-radius:20px;border:2px solid rgba(67,217,245,.55);display:grid;place-items:center;background:rgba(67,217,245,.07)}
+h1{font:800 104px/0.95 Inter;letter-spacing:-.035em}
+.tag{margin-top:34px;font:600 44px/1.14 Inter;letter-spacing:-.02em;color:#E6EEF7}
+.tag em{font-style:normal;color:#43D9F5}.tag i{font-style:normal;color:#FFBB55}.tag b{color:#4FE0A5;font-weight:600}
+.proof{position:absolute;left:84px;bottom:84px;display:flex;gap:16px}
+.chip{padding:16px 20px;border-radius:14px;background:rgba(16,24,38,.92);border:1px solid rgba(110,150,190,.28)}
+.chip .k{font:600 13px "IBM Plex Mono";letter-spacing:.16em;color:#56677C;text-transform:uppercase}
+.chip .v{font:600 27px "IBM Plex Mono";margin-top:6px;white-space:nowrap}
+.call{position:absolute;right:70px;top:84px;width:400px;padding:18px 20px;border-radius:16px;background:rgba(13,21,34,.95);border:1px solid rgba(79,224,165,.45);box-shadow:0 20px 60px rgba(0,0,0,.55)}
+.call .h{display:flex;align-items:center;gap:10px;font:600 14px "IBM Plex Mono";letter-spacing:.14em;color:#4FE0A5;text-transform:uppercase}
+.dot{width:10px;height:10px;border-radius:10px;background:#4FE0A5;box-shadow:0 0 12px #4FE0A5}
+.call .q{margin-top:12px;font:500 21px/1.3 Inter;color:#C9D6E4}.call .a{margin-top:8px;font:700 24px Inter;color:#E6EEF7}
+.held{position:absolute;right:96px;bottom:118px;padding:16px 20px;border-radius:16px;background:rgba(13,21,34,.95);border:1px solid rgba(255,187,85,.5);box-shadow:0 20px 60px rgba(0,0,0,.55);width:360px}
+.held .h{font:600 14px "IBM Plex Mono";letter-spacing:.14em;color:#FFBB55;text-transform:uppercase}
+.held .t{margin-top:8px;font:600 22px/1.25 Inter}.held .s{margin-top:6px;font:500 16px "IBM Plex Mono";color:#8A9BB0}
+</style></head><body>
+<div class="bg"></div><div class="grid"></div>
+<div class="scene"><img src="scene.png"></div>
+<div class="call"><div class="h"><span class="dot"></span>On-call · live phone call</div>
+ <div class="q">“Do you approve plan PLN-049, version 3?”</div><div class="a">“Yes.”</div></div>
+<div class="held"><div class="h">● Invoice held</div><div class="t">$4,850 “CRAH repair”</div><div class="s">PO-7731 already billed</div></div>
+<div class="left">
+ <div class="eyebrow">Autonomous data-center ops</div>
+ <div class="brand"><div class="mark"><svg width="58" height="58" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="5" height="16" rx="1" stroke="#E6EEF7"/><rect x="10" y="4" width="5" height="16" rx="1" stroke="#E6EEF7"/><path d="M17.5 8c1.6 1 1.6 3 0 4s-1.6 3 0 4" stroke="#43D9F5"/><path d="M5.5 8v1.5" stroke="#FF8A5B"/></svg></div><h1>GRIDPILOT</h1></div>
+ <div class="tag">It <em>cools the racks</em>,<br><b>calls the engineer</b>,<br>and <i>catches the overcharge</i>.</div>
+</div>
+<div class="proof">
+ <div class="chip"><div class="k">Rack R17</div><div class="v"><span style="color:#FF596E">89.8</span> → <span style="color:#4FE0A5">50.2°C</span></div></div>
+ <div class="chip"><div class="k">AI never says yes</div><div class="v" style="color:#43D9F5">Human-gated</div></div>
+</div>
+</body></html>
