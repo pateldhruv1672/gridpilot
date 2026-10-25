@@ -968,11 +968,20 @@ function ImpactRows({ imp, compact }) {
     {imp.units.map(x => <div key={x.uid} style={{ font: '10.5px ' + MONO, color: C.mute }}>{x.uid} fan {Math.round(x.before.fan_pct)}% → <span style={{ color: C.text }}>{Math.round(x.now.fan_pct)}%</span> · supply {x.before.supply_c.toFixed(1)} → {x.now.supply_c.toFixed(1)}°C</div>)}
   </div>;
 }
+function ImpactHeadline({ imp }) {
+  const m = imp.main; if (!m) return null; const f = imp.forecastEnd; const diff = f != null ? +(m.now.gpu_c - f).toFixed(1) : null;
+  return <div className="mt-1.5">
+    <div className="flex items-baseline gap-2 flex-wrap"><span style={{ font: '600 12px ' + MONO, color: C.text }}>{m.rid}</span>
+      <span className="gp-nw" style={{ font: '500 17px ' + MONO, color: C.mute }}>{m.before.gpu_c.toFixed(1)} → <b style={{ color: C.text, fontWeight: 600 }}>{m.now.gpu_c.toFixed(1)}</b> °C</span>
+      <span className="gp-nw" style={{ font: '600 17px ' + MONO, color: impactColor(m.d) }}>{m.d < 0 ? '▼' : '▲'}{Math.abs(m.d).toFixed(1)}</span></div>
+    {diff != null && <div className="gp-nw" style={{ font: '11px ' + MONO, color: C.mute, marginTop: 2 }}>forecast {f.toFixed(1)} °C · <span style={{ color: diff <= 0.5 ? C.mint : C.amber }}>{diff <= 0 ? 'beat forecast by ' + Math.abs(diff).toFixed(1) + ' °C' : diff <= 0.5 ? 'on forecast' : Math.abs(diff).toFixed(1) + ' °C above forecast'}</span></div>}
+  </div>;
+}
 function ImpactHud({ imp }) {
   if (!imp) return null; const m = imp.main;
   return <div className="rounded-lg p-3" style={{ width: 340, background: 'rgba(10,16,26,.9)', border: '1px solid ' + (imp.recovered ? 'rgba(79,224,165,.4)' : 'rgba(67,217,245,.3)') }}>
     <Label color={imp.recovered ? C.mint : C.cyan}>Strategy impact · measured</Label><div style={{ font: '10px ' + MONO, color: C.dim, marginTop: 2 }}>{imp.plan ? imp.plan.plan_id + ' v' + imp.plan.version : imp.ex.id} · applied {fmtT(Math.max(0, imp.simAge))} ago (sim)</div>
-    {m && <div className="flex items-baseline gap-2 mt-1.5"><span style={{ font: '600 20px ' + MONO, color: impactColor(m.d), letterSpacing: '-.02em' }}>{m.d < 0 ? '▼' : '▲'}{Math.abs(m.d).toFixed(1)}°C</span><span style={{ font: '11px ' + SANS, color: C.mute }}>{m.rid} GPU hotspot{imp.forecastEnd != null ? ' · forecast end ' + imp.forecastEnd + '°C' : ''}</span></div>}
+    <ImpactHeadline imp={imp} />
     <div className="mt-2"><ImpactRows imp={imp} compact /></div>
     <div style={{ font: '9.5px ' + MONO, color: C.dim, marginTop: 6 }}>before = rack state captured at apply · now = live telemetry · halos on racks in the scene</div>
   </div>;
@@ -1072,8 +1081,9 @@ function IncidentPanel({ g, setModal, toast }) {
     {!plan && inc.state !== 'CLOSED' && <div className="px-4 py-3" style={{ borderBottom: '1px solid ' + C.line, font: '11.5px/1.5 ' + SANS, color: C.mute }}>Waiting for CREAO to propose a plan. Plans only appear from real agent tool calls (or an operator what-if in Agent Operations).</div>}
     {(() => { const imp = computeImpact(inc, snap); return imp ? <div className="px-4 py-3" style={{ borderBottom: '1px solid ' + C.line }}>
       <div className="flex justify-between items-baseline"><Label color={imp.recovered ? C.mint : C.cyan}>Strategy impact · measured</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>applied {fmtT(Math.max(0, imp.simAge))} ago (sim)</span></div>
-      <div className="mt-2"><ImpactRows imp={imp} /></div>
-      {imp.main && imp.forecastEnd != null && <div style={{ font: '10.5px ' + MONO, color: C.mute, marginTop: 6 }}>{imp.main.rid}: forecast end {imp.forecastEnd}°C · measured now {imp.main.now.gpu_c.toFixed(1)}°C · inlet {imp.main.before.inlet_c.toFixed(1)} → {imp.main.now.inlet_c.toFixed(1)}°C{imp.main.now.inlet_c > 27 ? ' (inlet stays warm until the cooling unit is repaired)' : ''}</div>}
+      <ImpactHeadline imp={imp} />
+      <div className="mt-3"><ImpactRows imp={imp} /></div>
+      {imp.main && <div style={{ font: '10.5px ' + MONO, color: C.mute, marginTop: 6 }}>{imp.main.rid} inlet {imp.main.before.inlet_c.toFixed(1)} → {imp.main.now.inlet_c.toFixed(1)}°C{imp.main.now.inlet_c > 27 ? ' (inlet stays warm until the cooling unit is repaired)' : ''}</div>}
     </div> : null; })()}
     {exec && <div className="px-4 py-3" style={{ borderBottom: '1px solid ' + C.line }}>
       <div className="flex justify-between"><Label>Execution {exec.id}</Label><span style={{ font: '10px ' + MONO, color: exec.state === 'rolled_back' ? C.red : C.mint }}>{exec.state}</span></div>
