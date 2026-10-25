@@ -21,6 +21,11 @@
 - **Verified run:** the first blueprint (GH-5b8988, 6 proposals) found that C02 was at 28% coil effectiveness while no incident opened (incidents only fire above 88 °C). Approving its detector and its "Cooling Degradation Sentinel" agent dispatched both; the detector fired on C02 within seconds and launched the new CREAO agent, which analysed the slopes of all 128 GPUs behind C02 and filed a finding.
 - **Per-GPU telemetry:** all 512 GPUs have an owner, utilization, temperature, board power, memory, clock and throttle state (thermal or power-cap), with history. GPU fleet tab: fleet map (64 racks × 8), per-rack drill-down, utilization distribution, GPUs per workload, hottest GPUs; the 3D twin shows 8 GPU blades per rack.
 
+## Scenarios and live agent reasoning
+- **Scenarios tab:** seven runnable situations (cooling failure at peak, a fix that fails after deploy, C04 bearing wear, vendor fraud and over-billing, grid price spike, after-hours intrusion, and a compound storm running them together). Only the faults are scripted; every response comes from the real detectors, CREAO agents, policy, approvals and execution. A live board tracks all 14 participants from recorded events, with each one's latest thought and the fix it produced.
+- **Agents think out loud:** every CREAO agent attaches a `thought` to each tool call; GRIDPILOT streams them live in Scenarios, Agent Operations and an overlay on the 3D view, next to a plain-English translation of each call and result.
+- **Verified storm run:** within five minutes the watcher escalated the intrusion, the battery discharged through the price spike and stopped at its 40% reserve ($112 saved), the matcher held a lookalike-domain bank change and disputed an over-billed invoice, the AP Analyst made 12 recommendations, the Explainer explained the hold, the predictor flagged C04 (RUL 885 s), the detector opened INC-044 and the Remediation Agent proposed PLN-044, gated by policy for human approval.
+
 ## Cartesia
 - Voice is the approval channel: a Managed Agent calls the on-call engineer, explains the incident, evaluates their alternative live through a webhook tool, and collects approval with a one-time code verified by the backend.
 - Features: Managed Agents, Sonic voice, agent webhook tools with dynamic variables, phone number provisioning, outbound calls, call status/transcript polling.

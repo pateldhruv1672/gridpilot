@@ -66,9 +66,11 @@ class Twin:
     def site_hour(self, t=None): return (SITE_START_H + (self.t if t is None else t) * SITE_H_PER_SIM_S) % 24
 
     # ------------------------------------------------------------ scenarios
-    def inject(self, kind, sim=None):
-        if kind == "crah_bearing_wear":           # C02 fan bearing starts wearing fast: functional failure in about 15 sim minutes
-            a = self.assets["C02"]; a["rate"] = (1 - a["wear"]) / 900.0     # accelerated wear from its current level (no step change)
+    def inject(self, kind, sim=None, unit=None):
+        if kind == "crah_bearing_wear":           # a CRAH fan bearing starts wearing fast: functional failure in about 15 sim minutes
+            a = self.assets[unit if unit in ("C01", "C02", "C03", "C04") else "C02"]; a["rate"] = (1 - a["wear"]) / 900.0     # accelerated wear from its current level (no step change)
+        elif kind == "grid_price_spike":          # wholesale price spike: tariff x4 for 3 site hours (3 sim minutes)
+            self.spike_mult = 4.0; self.spike_until = self.t + 180
         elif kind == "ups_aging":
             a = self.assets["UPS-A"]; a["wear"] = max(a["wear"], 0.45); a["rate"] = (1 - a["wear"]) / 1500.0
         elif kind == "security_anomaly":
@@ -105,7 +107,7 @@ class Twin:
         if self.t - self._last_series >= 2:
             self._last_series = self.t
             self.series.append({"t": round(self.t, 1), "grid_kw": round(self.energy["grid_kw"], 1), "bess_kw": round(self.bess["kw"], 1), "soc": round(self.bess["soc"] * 100, 1),
-                                "tariff": tariff(self.site_hour()), "carbon": carbon(self.site_hour()), "site_h": round(self.site_hour(), 2),
+                                "tariff": round(tariff(self.site_hour()) * (getattr(self, "spike_mult", 1.0) if self.t < getattr(self, "spike_until", -1) else 1.0), 3), "carbon": carbon(self.site_hour()), "site_h": round(self.site_hour(), 2),
                                 **{"vib_" + k: self.assets[k]["sensors"].get("vibration_mm_s") for k in ("C01", "C02", "C03", "C04")},
                                 "ups_a_runtime": self.assets["UPS-A"]["sensors"].get("runtime_min")})
             self.series = self.series[-300:]
@@ -157,11 +159,14 @@ class Twin:
         A["ACCESS-1"]["sensors"] = {"events_1h": len([e for e in self.security if self.t - e["t"] < 300]), "open_alerts": len([e for e in self.security if e["severity"] == "high"])}
 
     def _energy(self, sim, dt):
-        fac = float(sim.it_kw + sim.cool_kw + 0.04 * sim.it_kw); h = self.site_hour(); price = tariff(h)
+        fac = float(sim.it_kw + sim.cool_kw + 0.04 * sim.it_kw); h = self.site_hour()
+        spiking = self.t < getattr(self, "spike_until", -1)
+        price = tariff(h) * (getattr(self, "spike_mult", 1.0) if spiking else 1.0)
         b = self.bess; cap = 500.0
         # Energy agent policy (deterministic, autonomous within bounds): shave peak above 640 kW during the peak window, keep a 40% ride-through reserve, recharge off-peak.
         target = 0.0; mode = "idle"
-        if PEAK[0] <= h < PEAK[1] and b["soc"] > 0.40: target = min(250.0, max(0.0, fac - 560.0) + 60.0); mode = "peak_shave"
+        if spiking and b["soc"] > 0.40: target = 250.0; mode = "price_spike_discharge"
+        elif PEAK[0] <= h < PEAK[1] and b["soc"] > 0.40: target = min(250.0, max(0.0, fac - 560.0) + 60.0); mode = "peak_shave"
         elif price <= 0.09 and b["soc"] < 0.95: target = -150.0; mode = "charge"
         b["kw"] += (target - b["kw"]) * min(1, dt / 4)
         b["soc"] = float(np.clip(b["soc"] - b["kw"] * dt / 3600 / cap * 60, 0, 1))   # x60: sim minute = site hour, so energy moves at site-clock pace
@@ -198,7 +203,7 @@ class Twin:
 
     def snapshot(self, preds):
         return {"site_time": "%02d:%02d" % (int(self.site_hour()), int((self.site_hour() % 1) * 60)), "site_hour": round(self.site_hour(), 2),
-                "tariff": tariff(self.site_hour()), "carbon": carbon(self.site_hour()), "peak_window": list(PEAK),
+                "tariff": round(tariff(self.site_hour()) * (getattr(self, "spike_mult", 1.0) if self.t < getattr(self, "spike_until", -1) else 1.0), 3), "carbon": carbon(self.site_hour()), "peak_window": list(PEAK),
                 "subsystems": self.subsystem_health(preds),
                 "assets": [{k: a[k] for k in ("id", "subsystem", "kind", "name", "serves", "state", "sensors")} | {"failure_mode": PREDICTABLE.get(a["kind"]),
                             "maintenance": a.get("maint")} for a in self.assets.values()],

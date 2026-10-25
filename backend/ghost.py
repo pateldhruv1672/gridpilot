@@ -267,7 +267,7 @@ class Ghost:
                 hit = v > sp["threshold"] if sp["op"] == ">" else v < sp["threshold"]
                 st[key] = st.get(key, 0) + 1 if hit else 0
                 if st[key] == sp["for_ticks"]: fired.append((key, v))
-            if not fired or time.time() - (o.get("last_fire") or 0) < 600: continue
+            if not fired or time.time() - (o.get("last_fire") or 0) < 1800: continue
             name = lambda k: gid(k) if sp["metric"].startswith("gpu_") else (S.rack_id(k // 8, k % 8) if sp["metric"].startswith("rack_") else str(k))
             items = [{"target": name(k), "value": round(v, 2)} for k, v in fired[:12]]
             self.db.ex("insert into findings(ts,source,severity,title,data) values(?,?,?,?,?)", (time.time(), "detector:" + o["id"], sp["severity"],

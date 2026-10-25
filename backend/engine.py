@@ -60,6 +60,11 @@ class DB:
     def set(self, k, v): self.ex("insert or replace into settings(k,v) values(?,?)", (k, jd(v)))
 
 
+THOUGHT_RULE = ("\n\nThink out loud (mandatory): every tool call body MUST include a field `thought` (1 to 3 sentences, first person, plain English) saying "
+                "what you are checking or doing and why, given what you have learned so far, e.g. \"R17 is 91C while its inlet is only 27C, so I suspect "
+                "local airflow loss rather than room heat; checking neighbours.\" GRIDPILOT streams these thoughts live to the operator. Never put "
+                "secrets in a thought. Thoughts never change what a tool does.")
+
 class Engine:
     def __init__(self, sim, owner_uid):
         self.sim = sim; self.owner = owner_uid; self.db = DB()
@@ -289,6 +294,7 @@ class Engine:
 
     # ------------------------------------------------------------------ dynamic CREAO agents (CREAO CLI, cr_sk_ key)
     async def ensure_agent(self, kind, name, text):
+        text = text + THOUGHT_RULE
         key = kind + ":" + hashlib.sha256(text.encode()).hexdigest()[:12]
         row = self.db.one("select * from specialists where key=?", (key,))
         if row and row["status"] == "ready": return key, row["agent_id"]

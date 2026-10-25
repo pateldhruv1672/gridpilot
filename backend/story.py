@@ -66,7 +66,8 @@ def agent_steps(db, run_ids):
     out = []
     for rid in run_ids:
         for t in db.all("select tool, args, result, ok, ts from tool_calls where run_ref=? order by id", (rid,)):
-            out.append({"tool": t["tool"], "text": interpret_tool(t["tool"], t["args"], t["result"]), "ok": bool(t["ok"]), "ts": t["ts"]})
+            a = _j(t["args"]) or {}
+            out.append({"tool": t["tool"], "text": interpret_tool(t["tool"], t["args"], t["result"]), "thought": a.get("thought") if isinstance(a, dict) else None, "ok": bool(t["ok"]), "ts": t["ts"]})
     return out
 
 def compare_options(opts, chosen_acts, peak_key, cf_key, goal_c=85.0, cost_key="incremental_cost_usd"):

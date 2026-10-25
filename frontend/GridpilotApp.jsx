@@ -878,9 +878,104 @@ function GhostTab({ g, toast, narrow }) {
   </div>;
 }
 
+function TypeText({ text, speed = 14 }) {
+  const [n, setN] = React.useState(0);
+  React.useEffect(() => { setN(0); if (!text) return; const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; if (reduce) { setN(text.length); return; } const t = setInterval(() => setN(x => { if (x >= text.length) { clearInterval(t); return x; } return x + 2; }), speed); return () => clearInterval(t); }, [text]);
+  return <span>{text.slice(0, n)}{n < (text || '').length && <span className="gp-caret">▍</span>}</span>;
+}
+function useReasoning(g, ms = 2000) {
+  const [d, setD] = React.useState(null);
+  React.useEffect(() => { let dead = false; const load = () => g.api('/api/reasoning').then(r => { if (!dead) setD(r); }).catch(() => { }); load(); const t = setInterval(load, ms); return () => { dead = true; clearInterval(t); }; }, [g.url]);
+  return d;
+}
+const RUN_ACTIVE = s => ['starting', 'pending', 'running', 'queued', 'awaiting_agent', 'in_progress'].includes(s);
+function LiveReasoning({ g, compact, filterRuns }) {
+  const d = useReasoning(g);
+  if (!d) return compact ? null : <div style={{ font: '11px ' + SANS, color: C.mute }}>Connecting to the agent stream…</div>;
+  let runs = d.runs; if (filterRuns) runs = runs.filter(r => filterRuns(r));
+  const ids = new Set(runs.map(r => r.id)); const calls = d.calls.filter(c => ids.has(c.run_ref));
+  const newest = calls.length ? calls[calls.length - 1].id : null;
+  if (compact) {
+    const last = calls.filter(c => c.thought).slice(-3); const act = runs.filter(r => RUN_ACTIVE(r.status));
+    if (!last.length && !act.length) return null;
+    return <div className="flex flex-col gap-1.5 rounded-lg px-3 py-2" style={{ background: 'rgba(10,16,26,.82)', border: '1px solid rgba(67,217,245,.22)', backdropFilter: 'blur(6px)' }}>
+      <div style={{ font: '600 9px ' + MONO, letterSpacing: '.16em', color: C.dim }}>AGENTS · LIVE REASONING</div>
+      {act.slice(0, 2).map(r => <div key={r.id} className="flex items-center gap-1.5" style={{ font: '600 9.5px ' + MONO, color: C.cyan, letterSpacing: '.08em' }}><span className="gp-think"><i /><i /><i /></span>{r.agent.toUpperCase()} · {r.status === 'awaiting_agent' ? 'CREATING AGENT' : 'THINKING'} · {Math.round(d.now - r.created)}s</div>)}
+      {last.map(c => <div key={c.id} style={{ font: '11px/1.45 ' + SANS, color: c.id === newest ? C.text : C.mute, fontStyle: 'italic' }}>“{c.id === newest ? <TypeText text={c.thought} /> : c.thought}”</div>)}
+    </div>;
+  }
+  return <div className="flex flex-col gap-3">
+    {runs.length === 0 && <div style={{ font: '11.5px/1.5 ' + SANS, color: C.mute }}>No agent has run in the last 15 minutes. Start a scenario and watch the agents think here, live.</div>}
+    {runs.map(r => { const mine = calls.filter(c => c.run_ref === r.id); const act = RUN_ACTIVE(r.status); const idle = act && r.last_call_ts && d.now - r.last_call_ts > 4;
+      return <div key={r.id} className="rounded-lg" style={{ border: '1px solid ' + (act ? 'rgba(67,217,245,.4)' : C.line), background: act ? 'rgba(67,217,245,.03)' : 'transparent' }}>
+        <div className="flex items-center gap-2 px-2.5 py-1.5" style={{ borderBottom: '1px solid ' + C.line }}>
+          <span className={act ? 'gp-dot-live' : ''} style={{ width: 7, height: 7, borderRadius: 7, background: act ? C.cyan : r.status === 'completed' ? C.mint : C.red }} />
+          <span style={{ font: '600 11.5px ' + SANS, color: C.text, textTransform: 'capitalize' }}>{r.agent}</span>
+          <span className="ml-auto" style={{ font: '9.5px ' + MONO, color: C.dim }}>{r.status.replace('_', ' ')} · {r.calls} steps · {Math.round((act ? d.now : (r.last_call_ts || r.created)) - r.created)}s</span></div>
+        <div className="flex flex-col px-2.5 py-1.5 gap-1.5">
+          {mine.map(c => <div key={c.id} className="gp-tn" style={{ animationDuration: '.35s' }}>
+            {c.thought && <div style={{ font: '12px/1.5 ' + SANS, color: C.text, fontStyle: 'italic' }}>“{c.id === newest ? <TypeText text={c.thought} /> : c.thought}”</div>}
+            <div className="flex gap-1.5" style={{ font: '10.5px/1.45 ' + MONO, color: c.ok ? '#8fb3c9' : C.red }}><span>{c.ok ? '✓' : '✗'}</span><span>{c.summary}</span></div></div>)}
+          {act && <div className="flex items-center gap-1.5" style={{ font: '10.5px ' + MONO, color: C.cyan }}><span className="gp-think"><i /><i /><i /></span>{r.status === 'awaiting_agent' ? 'creating its CREAO agent' : mine.length ? (idle ? 'reasoning about the last result' : 'calling tools') : 'reading the case'}</div>}
+          {!mine.length && !act && <div style={{ font: '10.5px ' + SANS, color: C.dim }}>No tool calls recorded.</div>}
+        </div></div>; })}
+  </div>;
+}
+const LIVE_CSS = '.gp-root *{scrollbar-color:#24334a transparent;scrollbar-width:thin}.gp-caret{animation:gpBlink 1s steps(1) infinite;color:#43D9F5}@keyframes gpBlink{50%{opacity:.35}}.gp-think{display:inline-flex;gap:3px;align-items:center}.gp-think i{width:4px;height:4px;border-radius:4px;background:#43D9F5;display:inline-block;animation:gpDot 1.2s ease-in-out infinite}.gp-think i:nth-child(2){animation-delay:.15s}.gp-think i:nth-child(3){animation-delay:.3s}@keyframes gpDot{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:1;transform:translateY(-2px)}}.gp-tn{animation:gpIn .45s cubic-bezier(.2,.8,.2,1) both}@keyframes gpIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}.gp-dot-live{animation:gpBlink 1.4s ease-in-out infinite}@media (prefers-reduced-motion: reduce){.gp-caret,.gp-think i,.gp-tn,.gp-dot-live{animation:none!important}}';
+
+const PST = { waiting: C.dim, working: C.cyan, done: C.mint, failed: C.red, 'not needed': '#6f8299' };
+function ScenariosTab({ g, toast, narrow, openTrace }) {
+  const [d, setD] = React.useState(null); const [busy, setBusy] = React.useState(null); const [reset, setReset] = React.useState(true);
+  const owner = userId === ownerId;
+  React.useEffect(() => { let dead = false; const load = () => g.api('/api/scenarios').then(r => { if (!dead) setD(r); }).catch(() => { }); load(); const t = setInterval(load, 2500); return () => { dead = true; clearInterval(t); }; }, [g.url]);
+  const run = async (id) => { setBusy(id); try { const r = await g.api('/api/scenarios/' + id + '/run', 'POST', { reset }); toast(r.message, 'ok'); } catch (e) { toast(e.message, 'err'); } setBusy(null); };
+  const stop = async () => { try { const r = await g.api('/api/scenarios/stop', 'POST', {}); toast(r.message, 'ok'); } catch (e) { toast(e.message, 'err'); } };
+  const cur = d && d.current; const sc = d ? d.scenarios : [];
+  return <div className={'flex-1 min-h-0 grid gap-3 p-3' + (narrow ? ' overflow-auto' : '')} style={{ background: C.bg, gridTemplateColumns: narrow ? '1fr' : 'minmax(280px, 340px) minmax(0, 1fr) minmax(320px, 400px)', gridAutoRows: narrow ? 'max-content' : undefined }}>
+    <style>{LIVE_CSS}</style>
+    <div className="flex flex-col gap-2 min-h-0 overflow-auto">
+      <div className="flex items-center gap-2"><Label color={C.cyan}>Scenarios</Label><label className="ml-auto flex items-center gap-1.5" style={{ font: '10px ' + MONO, color: C.mute }}><input type="checkbox" checked={reset} onChange={e => setReset(e.target.checked)} style={{ accentColor: C.cyan }} />reset site first</label></div>
+      <div style={{ font: '10.5px/1.5 ' + SANS, color: C.mute }}>Only the faults are scripted. Every response comes from the real detectors, CREAO agents, policy, approvals and execution.</div>
+      {sc.map(s => { const on = cur && cur.id === s.id;
+        return <div key={s.id} className="p-3 rounded-lg" style={{ background: C.p1, border: '1px solid ' + (on ? 'rgba(67,217,245,.45)' : C.line) }}>
+          <div className="flex items-start gap-2"><div style={{ font: '600 12.5px/1.35 ' + SANS, color: C.text }}>{s.title}</div>
+            {owner && <span className="ml-auto flex-shrink-0"><Btn small tone={s.id === 'storm' ? 'primary' : 'ghost'} disabled={!!busy || !!(cur && cur.status === 'running')} onClick={() => run(s.id)}>{busy === s.id ? 'Starting…' : 'Run'}</Btn></span>}</div>
+          <div style={{ font: '11px/1.5 ' + SANS, color: C.mute, marginTop: 4 }}>{s.summary}</div>
+          <div className="flex flex-wrap gap-1 mt-2">{s.participants.map(p => <span key={p.id} style={{ font: '9.5px ' + MONO, padding: '1px 6px', borderRadius: 999, border: '1px solid ' + C.line, color: p.kind === 'CREAO' ? C.cyan : p.kind === 'Cartesia' ? '#b49cff' : C.mute }}>{p.name}</span>)}</div>
+        </div>; })}
+    </div>
+    <div className="flex flex-col gap-3 min-h-0 overflow-auto">
+      {cur ? <>
+        <Panel style={{ padding: 12 }}>
+          <div className="flex items-center gap-2 flex-wrap"><span className={cur.status === 'running' ? 'gp-dot-live' : ''} style={{ width: 8, height: 8, borderRadius: 8, background: cur.status === 'running' ? C.cyan : C.dim }} />
+            <span style={{ font: '600 14px ' + SANS, color: C.text }}>{cur.title}</span><span style={{ font: '10px ' + MONO, color: C.dim }}>{cur.status} · {Math.floor(cur.elapsed_s / 60)}m {String(cur.elapsed_s % 60).padStart(2, '0')}s · {cur.creao_runs} CREAO runs</span>
+            {owner && cur.status === 'running' && <span className="ml-auto"><Btn small tone="danger" onClick={stop}>Stop</Btn></span>}</div>
+          <div className="mt-2" style={{ height: 6, borderRadius: 3, background: 'rgba(255,255,255,.05)' }}><div style={{ width: Math.round(cur.done / Math.max(1, cur.total) * 100) + '%', height: 6, borderRadius: 3, background: 'linear-gradient(90deg,' + C.cyan + ',' + C.mint + ')', transition: 'width .6s' }} /></div>
+          <div style={{ font: '10px ' + MONO, color: C.mute, marginTop: 4 }}>{cur.done}/{cur.total} participants finished · {cur.active} working now · approvals still need you (Control Room / Twin & reliability)</div>
+        </Panel>
+        <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
+          {cur.participants.map(p => <div key={p.id} className="p-2.5 rounded-lg flex flex-col gap-1" style={{ background: C.p1, border: '1px solid ' + (p.status === 'working' ? 'rgba(67,217,245,.45)' : C.line) }}>
+            <div className="flex items-center gap-2"><span className={p.status === 'working' ? 'gp-dot-live' : ''} style={{ width: 7, height: 7, borderRadius: 7, background: PST[p.status] }} /><span style={{ font: '600 11.5px ' + SANS, color: C.text }}>{p.name}</span>
+              <span className="ml-auto" style={{ font: '600 8.5px ' + MONO, letterSpacing: '.1em', color: PST[p.status] }}>{p.status.toUpperCase()}</span></div>
+            {p.thought && <div style={{ font: '11px/1.45 ' + SANS, color: '#c7d6e6', fontStyle: 'italic' }}>“{p.thought.text}”</div>}
+            {p.fix && <div style={{ font: '10.5px/1.45 ' + MONO, color: p.status === 'failed' ? C.red : C.mute }}>{p.fix}</div>}
+            {!p.fix && !p.thought && <div style={{ font: '10.5px ' + SANS, color: C.dim }}>{p.status === 'waiting' ? 'waiting for its trigger' : ''}</div>}
+            {p.link && p.link.id && <button onClick={() => openTrace(p.link)} className="self-start" style={{ font: '600 10px ' + SANS, color: C.cyan }}>Open decision trace →</button>}
+          </div>)}
+        </div>
+        <Panel style={{ padding: 10 }}><Label>Stimuli fired</Label>{(cur.stages || []).map((x, i) => <div key={i} className="flex gap-2" style={{ font: '10.5px/1.6 ' + MONO }}><span style={{ color: C.dim, width: 46, flexShrink: 0 }}>+{Math.round(x.at)}s</span><span style={{ color: x.error ? C.red : C.text, flexShrink: 0 }}>{x.kind} {x.arg || ''}</span><span className="truncate" style={{ color: C.dim }}>{x.error || (x.result && (x.result.invoice ? x.result.invoice + ' → ' + x.result.decision : x.result.agent_run || x.result.message || ''))}</span></div>)}</Panel>
+      </> : <Panel style={{ padding: 16 }}><Label color={C.cyan}>No scenario running</Label><div style={{ font: '12px/1.6 ' + SANS, color: C.mute, marginTop: 6 }}>Pick a scenario on the left. "Compound storm" puts all 14 participants to work at once: security, energy, finance, predictive maintenance and a live cooling incident on the same simulated site.</div></Panel>}
+    </div>
+    <Panel className="flex flex-col min-h-0" style={{ padding: 12 }}>
+      <div className="flex items-center gap-2 mb-2"><Label color={C.cyan}>Live agent reasoning</Label><span style={{ font: '9.5px ' + MONO, color: C.dim }}>agents think out loud on every tool call</span></div>
+      <div className="flex-1 min-h-0 overflow-auto"><LiveReasoning g={g} /></div>
+    </Panel>
+  </div>;
+}
+
 function ControlRoom({ g, setModal, toast, narrow }) {
   const [opts, setOpts] = React.useState({ mode: 'combined', density: 0.7, intensity: 1, paused: false, labels: false });
-  const [sel, setSel] = React.useState(null); const [cmd, setCmd] = React.useState({ n: 0 }); const [strip, setStrip] = React.useState(true);
+  const [sel, setSel] = React.useState(null); const [cmd, setCmd] = React.useState({ n: 0 }); const [strip, setStrip] = React.useState(false); const [focus, setFocus] = React.useState(false);
   const snap = g.snapRef.current; const selR = snap && sel != null ? snap.racks[sel] : null;
   const onSelect = React.useCallback((i) => setSel(i), []);
   const set = (k, v) => setOpts(o => ({ ...o, [k]: v }));
@@ -888,7 +983,7 @@ function ControlRoom({ g, setModal, toast, narrow }) {
   const lat = snap ? snap.latency : {};
   return <div className={'flex flex-col min-h-0 flex-1' + (narrow ? ' overflow-auto' : '')}>
     <div className={narrow ? 'flex flex-col' : 'flex flex-1 min-h-0'}>
-      <div className="relative min-w-0" style={narrow ? { height: 460, flexShrink: 0 } : { flex: '1 1 auto' }}>
+      <div className="relative min-w-0" style={narrow ? { height: focus ? 'calc(var(--mana-app-height, 82vh) - 60px)' : 600, flexShrink: 0 } : { flex: '1 1 auto' }}>
         <DataCenterScene snapRef={g.snapRef} gpusRef={g.gpusRef} opts={opts} selected={sel} onSelect={onSelect} camCmd={cmd} />
         <div className="absolute left-3 top-3 flex flex-col gap-2 pointer-events-auto" style={{ maxWidth: narrow ? 'calc(100% - 24px)' : undefined }}>
           <div className="flex rounded-full p-0.5" style={{ background: 'rgba(16,24,38,.85)', border: '1px solid ' + C.line2 }}>
@@ -902,8 +997,10 @@ function ControlRoom({ g, setModal, toast, narrow }) {
           </div>
         </div>
         <div className="absolute right-3 flex gap-1.5" style={{ top: 104, background: 'rgba(16,24,38,.8)', padding: 4, borderRadius: 8, border: '1px solid ' + C.line }}>
-          {camBtn('reset', 'Reset')}{camBtn('iso', '3D iso')}{camBtn('top', '2D top')}{camBtn('focus', 'Focus')}
+          {camBtn('reset', 'Reset')}{camBtn('iso', '3D iso')}{camBtn('top', '2D top')}{camBtn('focus', 'Focus rack')}
+          <button onClick={() => setFocus(f => !f)} style={{ font: '600 10.5px ' + MONO, color: focus ? '#04121a' : C.cyan, background: focus ? C.cyan : 'transparent', padding: '4px 8px', borderRadius: 6, border: '1px solid rgba(67,217,245,.45)' }}>{focus ? '⤡ Exit full view' : '⤢ Full view'}</button>
         </div>
+        <div className="absolute right-3" style={{ top: 146, width: 330, pointerEvents: 'none' }}><LiveReasoning g={g} compact /></div>
         <div className="absolute left-3 bottom-3 px-3 py-2 rounded-lg" style={{ background: 'rgba(16,24,38,.82)', border: '1px solid ' + C.line, font: '10px ' + MONO, color: C.mute }}>
           <div className="flex items-center gap-2"><span>18°C</span><span style={{ width: 130, height: 6, borderRadius: 3, background: 'linear-gradient(90deg,#4087ff,#43D9F5,#4FE0A5,#FFBB55,#ff7340,#FF596E)' }} /><span>41°C</span></div>
           <div style={{ marginTop: 4, color: C.dim }}>Floor: air temperature field · Rack edges: {opts.mode === 'power' ? 'power kW' : opts.mode === 'workload' ? 'GPU utilization' : 'GPU hotspot / status'}</div>
@@ -916,11 +1013,11 @@ function ControlRoom({ g, setModal, toast, narrow }) {
           <div className="mt-2" style={{ font: '10px/1.5 ' + MONO, color: C.mute }}>{selR.workloads.map(w => <div key={w} className="flex justify-between"><span>{w}</span><span style={{ color: lat[w] && lat[w].breach ? C.red : C.dim }}>{lat[w] ? lat[w].p95_ms + '/' + lat[w].limit_ms + 'ms' : ''}</span></div>)}</div>
         </div>}
       </div>
-      <div className="min-w-0 overflow-auto" style={narrow ? { borderTop: '1px solid ' + C.line, background: C.p1 } : { flex: '0 0 max(360px, 35%)', borderLeft: '1px solid ' + C.line, background: C.p1 }}>
+      {!focus && <div className="min-w-0 overflow-auto" style={narrow ? { borderTop: '1px solid ' + C.line, background: C.p1 } : { flex: '0 0 clamp(300px, 25%, 380px)', borderLeft: '1px solid ' + C.line, background: C.p1 }}>
         <IncidentPanel g={g} setModal={setModal} toast={toast} />
-      </div>
+      </div>}
     </div>
-    <BottomStrip g={g} open={strip} setOpen={setStrip} />
+    {!focus && <BottomStrip g={g} open={strip} setOpen={setStrip} />}
   </div>;
 }
 
@@ -1245,16 +1342,17 @@ function AgentSteps({ steps }) {
   return <div className="flex flex-col">{steps.map((x, i) => <div key={i} className="flex gap-2.5" style={{ padding: '5px 0', borderBottom: '1px solid rgba(110,150,190,.07)' }}>
     <span style={{ flexShrink: 0, font: '9.5px ' + MONO, color: C.dim, width: 42 }}>+{Math.round(x.ts - t0)}s</span>
     <span style={{ flexShrink: 0, color: x.ok ? C.mint : C.red, font: '11px ' + MONO }}>{x.ok ? '✓' : '✗'}</span>
-    <div className="min-w-0"><div style={{ font: '11.5px/1.45 ' + SANS, color: C.text }}>{x.text}</div><div style={{ font: '9.5px ' + MONO, color: C.dim }}>{x.tool}</div></div></div>)}</div>;
+    <div className="min-w-0">{x.thought && <div style={{ font: '12px/1.5 ' + SANS, color: C.text, fontStyle: 'italic' }}>“{x.thought}”</div>}<div style={{ font: '11px/1.45 ' + SANS, color: x.thought ? '#9fb3c8' : C.text }}>{x.text}</div><div style={{ font: '9.5px ' + MONO, color: C.dim }}>{x.tool}</div></div></div>)}</div>;
 }
 
-function AgentOps({ g, narrow }) {
+function AgentOps({ g, narrow, req }) {
   const st = g.state; const S_ = st && st.agent_summary; const K = (S_ && S_.kpis) || {}; const loops = (st && st.loops) || [];
   const [loopSel, setLoopSel] = React.useState(null); const [trace, setTrace] = React.useState(null); const [node, setNode] = React.useState(null); const [rtab, setRtab] = React.useState('story');
   const sel = loopSel || (loops.find(l => l.active) || loops[0] || null);
   const selKey = sel ? sel.kind + '/' + sel.id : null;
   const evHead = st && st.events && st.events[0] && st.events[0].id;
-  React.useEffect(() => { setNode(null); setTrace(null); setRtab('story'); }, [selKey]);
+  React.useEffect(() => { setNode(null); setTrace(null); setRtab(sel && sel.active ? 'live' : 'story'); }, [selKey]);
+  React.useEffect(() => { if (req && req.id) setLoopSel({ kind: req.kind, id: req.id, loop: req.kind === 'wo' ? 'Reliability' : req.kind === 'finance' ? 'Finance' : 'Remediation', title: req.id, active: true }); }, [req && req.n]);
   React.useEffect(() => { if (!selKey) return; let dead = false; g.api('/api/trace/' + selKey).then(t => { if (!dead) setTrace(t); }).catch(() => { }); return () => { dead = true; }; }, [selKey, evHead]);
   const evs = ((st && st.events) || []).filter(e => !['duplicate_telemetry_suppressed'].includes(e.type)).slice(0, 60);
   const inc = st && st.incident;
@@ -1313,8 +1411,9 @@ function AgentOps({ g, narrow }) {
           <div className="flex-1 min-h-0 overflow-auto"><OptionsTable rows={trace.story.options} kind={trace.kind} /></div></Panel>}
       </div>
       <div className="flex flex-col gap-2 min-h-0">
-        <div className="flex gap-1">{[['story', 'Interpretation'], ['steps', 'Agent steps'], ['detail', 'Step detail'], ['events', 'Live events']].map(([k, l]) => <button key={k} onClick={() => setRtab(k)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '4px 10px', color: rtab === k ? C.text : C.mute, background: rtab === k ? 'rgba(67,217,245,.12)' : 'transparent', border: '1px solid ' + (rtab === k ? 'rgba(67,217,245,.4)' : C.line), whiteSpace: 'nowrap' }}>{l}</button>)}</div>
+        <div className="flex gap-1">{[['live', 'Live reasoning'], ['story', 'Interpretation'], ['steps', 'Agent steps'], ['detail', 'Step detail'], ['events', 'Events']].map(([k, l]) => <button key={k} onClick={() => setRtab(k)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '4px 10px', color: rtab === k ? C.text : C.mute, background: rtab === k ? 'rgba(67,217,245,.12)' : 'transparent', border: '1px solid ' + (rtab === k ? 'rgba(67,217,245,.4)' : C.line), whiteSpace: 'nowrap' }}>{l}</button>)}</div>
         <Panel className="flex-1 min-h-0 overflow-auto" style={{ padding: 12 }}>
+          {rtab === 'live' && <LiveReasoning g={g} />}
           {rtab === 'story' && <StoryPanel g={g} trace={trace} sel={sel} />}
           {rtab === 'steps' && <><Label>What the agent did, call by call</Label><div style={{ font: '10.5px/1.5 ' + SANS, color: C.mute, margin: '3px 0 6px' }}>Each line is a real tool call the CREAO agent made against GRIDPILOT, translated into plain English.</div><AgentSteps steps={trace && trace.story && trace.story.agent_steps} /></>}
           {rtab === 'detail' && (node ? <div className="flex flex-col gap-2">
@@ -1391,7 +1490,7 @@ function UserDiv() {
   const narrow = W < 1180;
   const toggleFs = async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else await rootRef.current.requestFullscreen(); } catch (e) { } };
   const [tab, setTab] = React.useState('control'); const [modal, setModal] = React.useState(null); const [toasts, setToasts] = React.useState([]); const [demoOpen, setDemoOpen] = React.useState(false);
-  g.setTab = setTab;
+  g.setTab = setTab; const [traceReq, setTraceReq] = React.useState(null);
   const [rej, setRej] = React.useState(''); const [diffs, setDiffs] = React.useState({});
   const toast = React.useCallback((msg, kind) => { const id = Math.random(); setToasts(t => [...t, { id, msg, kind }]); setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4200); }, []);
   React.useEffect(() => { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap'; document.head.appendChild(l); return () => l.remove(); }, []);
@@ -1412,7 +1511,7 @@ function UserDiv() {
       <div className="flex items-center gap-2"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke={C.cyan} strokeWidth="1.6" /><path d="M7 15l3-3 3 2 4-5" stroke={C.cyan} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /><circle cx="17" cy="9" r="1.6" fill={C.red} /></svg>
         <span style={{ font: '600 13px ' + SANS, letterSpacing: '.14em' }}>GRIDPILOT</span></div>
       <span className="gp-nw" style={{ font: '500 10.5px ' + MONO, color: C.mute, letterSpacing: '.12em' }}>{narrow ? '' : 'ATLAS COMPUTE · SFO-01 · '}<span style={{ color: g.conn === 'live' ? C.mint : C.amber }}>{g.conn === 'live' ? 'SIMULATION LIVE' : g.conn.toUpperCase()}</span></span>
-      <div className="flex gap-1 flex-wrap">{[['control', 'Control Room'], ['gpus', narrow ? 'GPUs' : 'GPU fleet'], ['twin', narrow ? 'Twin' : 'Twin & reliability'], ['agents', narrow ? 'Agents' : 'Agent Operations'], ['ghost', narrow ? 'Ghost' : 'Ghost architect'], ['finops', narrow ? 'Finance' : 'Finance desk'], ['settings', narrow ? 'Setup' : 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
+      <div className="flex gap-1 flex-wrap">{[['control', 'Control Room'], ['scen', 'Scenarios'], ['gpus', narrow ? 'GPUs' : 'GPU fleet'], ['twin', narrow ? 'Twin' : 'Twin & reliability'], ['agents', narrow ? 'Agents' : 'Agent Operations'], ['ghost', narrow ? 'Ghost' : 'Ghost architect'], ['finops', narrow ? 'Finance' : 'Finance desk'], ['settings', narrow ? 'Setup' : 'Connections']].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ font: '600 11.5px ' + SANS, padding: '6px 11px', borderRadius: 7, color: tab === k ? C.text : C.mute, background: tab === k ? 'rgba(67,217,245,.1)' : 'transparent', border: '1px solid ' + (tab === k ? 'rgba(67,217,245,.3)' : 'transparent') }}>{l}</button>)}</div>
       <div className="ml-auto flex items-center flex-wrap gap-x-4 gap-y-1 gp-hdr" style={{ font: '500 10.5px ' + MONO, color: C.mute }}>
         <span className="gp-nw">HEALTH <b style={{ color: health[1] }}>{health[0]}</b></span>
         <span className="gp-nw">INCIDENT <b style={{ color: inc && inc.state !== 'CLOSED' ? C.red : C.mint }}>{inc && inc.state !== 'CLOSED' ? inc.severity + ' ' + inc.id : 'NONE'}</b></span>
@@ -1436,7 +1535,9 @@ function UserDiv() {
     </div>
     {tab === 'control' && <ControlRoom g={g} setModal={setModal} toast={toast} narrow={W < 900} />}
     {tab === 'finops' && <FinanceDesk g={g} toast={toast} narrow={W < 860} />}
-    {tab === 'agents' && <AgentOps g={g} narrow={W < 980} />}
+    <style>{LIVE_CSS}</style>
+    {tab === 'scen' && <ScenariosTab g={g} toast={toast} narrow={W < 980} openTrace={(l) => { setTraceReq({ ...l, n: Date.now() }); setTab('agents'); }} />}
+    {tab === 'agents' && <AgentOps g={g} narrow={W < 980} req={traceReq} />}
     {tab === 'twin' && <TwinTab g={g} toast={toast} narrow={W < 980} />}
     {tab === 'gpus' && <GpuFleet g={g} narrow={W < 980} />}
     {tab === 'ghost' && <GhostTab g={g} toast={toast} narrow={W < 980} />}

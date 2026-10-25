@@ -35,7 +35,7 @@ OPTIONS = {}           # incident -> list of evaluated options (summaries) for c
 DIRTY = {"v": True}
 ENG.notify = lambda: DIRTY.__setitem__("v", True)
 import finance_desk as FD
-import twin as TW, predict as PR, reliability as RL, gpus as GPUS, ghost as GHM, story as STY
+import twin as TW, predict as PR, reliability as RL, gpus as GPUS, ghost as GHM, story as STY, scenarios as SCN
 DESK = FD.Desk(ENG.db, notify=lambda: DIRTY.__setitem__("v", True), event=ENG.event)
 ENG.desk = DESK
 if not ENG.db.one("select id from ap_decisions where kind='recommendation' limit 1"): DESK.autonomous_pass()
@@ -161,7 +161,7 @@ def full_state():
     return {"incident": incident_detail(inc), "incidents": incs, "events": evs, "finance": finance_summary(), "integrations": integrations_status(),
             "series": list(ENG.series), "config_log": CS.log(15), "thresholds": S.THRESH, "speed": ENG.speed, "paused": ENG.paused,
             "fail_armed": ENG.fail_armed, "sim_t": round(SIM.t, 1), "evidence": EVIDENCE, "specialists": specialist_runs(), "desk": DESK.snapshot(),
-            "work_orders": REL.list(), "pm_proof": PRED.proof(), "twin": twin_payload(), "agent_summary": agent_summary(), "loops": loops(), "ghost": GHOST.view(), "gpus": FLEET.payload()}
+            "work_orders": REL.list(), "pm_proof": PRED.proof(), "twin": twin_payload(), "agent_summary": agent_summary(), "loops": loops(), "ghost": GHOST.view(), "gpus": FLEET.payload(), "scenario": SCEN.board()}
 
 def specialist_runs():
     out = []
@@ -267,6 +267,43 @@ async def api_trace_expl(req):
     ENG.event(None, "trace_explained", "mana:explainer", {"trace": req.match_info["kind"] + ":" + req.match_info["ident"], "chat_id": b.get("chat_id")}); DIRTY["v"] = True
     return jresp({"ok": True})
 
+async def ask_explainer(iid, q):
+    ENG.db.ex("insert into ap_decisions(invoice_id,ts,actor,decision,amount,reason,evidence,kind) values(?,?,?,?,?,?,?,?)", (iid, time.time(), "scenario", "question", 0, q, "[]", "question"))
+    local, err = await start_fin_agent("finance_explainer", "GRIDPILOT Finance Explainer", EXPLAIN_TEXT, EXPLAIN_TOOLS, {"task": "explain_decision", "invoice_id": iid, "question": q}, {"invoice_id": iid, "question": q, "mission": "explain a finance decision", "trigger": "scenario question on " + iid})
+    return {"agent_run": local, "error": err}
+
+class _SNS(dict):
+    def __getitem__(self, k): return globals()[k] if k in ("ENG", "REL", "TWIN", "DESK", "GHOST", "STY", "do_reset", "do_inject", "run_ap_review", "ask_explainer", "incident_detail") else dict.__getitem__(self, k)
+SCEN = SCN.Runner(_SNS(notify=lambda: DIRTY.__setitem__("v", True)))
+
+@routes.get("/api/scenarios")
+async def api_scen(req): viewer(req); return jresp({"scenarios": SCEN.defs(), "current": SCEN.board()})
+
+@routes.post("/api/scenarios/{sid}/run")
+async def api_scen_run(req):
+    uid = owner_only(req); b = await req.json() if req.can_read_body else {}
+    ok, msg = await SCEN.start(req.match_info["sid"], reset=b.get("reset", True), actor="operator:" + uid[:8]); DIRTY["v"] = True
+    return jresp({"ok": ok, "message": msg}, 200 if ok else 409)
+
+@routes.post("/api/scenarios/stop")
+async def api_scen_stop(req): uid = owner_only(req); SCEN.stop("operator:" + uid[:8]); DIRTY["v"] = True; return jresp({"ok": True, "message": "scenario stopped"})
+
+@routes.get("/api/reasoning")
+async def api_reasoning(req):
+    viewer(req)
+    act = ENG.db.all("select id, task, status, created, provider_run_id, incident_id from agent_runs where status in ('starting','pending','running','queued','awaiting_agent','in_progress') or completed > ? order by created desc limit 12", (time.time() - 900,))
+    refs = [r["id"] for r in act]
+    calls = ENG.db.all("select id, ts, run_ref, tool, args, result, ok from tool_calls where run_ref in (%s) order by id desc limit 80" % ",".join("?" * len(refs)), tuple(refs)) if refs else []
+    out = []
+    for t in calls:
+        a = STY._j(t["args"]) or {}
+        out.append({"id": t["id"], "ts": t["ts"], "run_ref": t["run_ref"], "tool": t["tool"], "ok": bool(t["ok"]), "thought": a.get("thought") if isinstance(a, dict) else None, "summary": STY.interpret_tool(t["tool"], t["args"], t["result"])})
+    runs = []
+    for r in act:
+        last = next((c for c in out if c["run_ref"] == r["id"]), None)
+        runs.append({**r, "agent": r["task"].replace("specialist:", "").replace("_", " "), "calls": sum(1 for c in out if c["run_ref"] == r["id"]), "last_call_ts": last["ts"] if last else None})
+    return jresp({"runs": runs, "calls": out[::-1], "now": time.time()})
+
 @routes.get("/api/ghost/digest")
 async def api_ghost_digest(req): owner_only(req); return jresp(GHOST.digest())
 
@@ -319,10 +356,8 @@ async def api_state(req): viewer(req); return jresp(full_state())
 @routes.get("/api/facility/state")
 async def api_fac(req): owner_only(req); return jresp(SIM.snapshot(field=False))
 
-@routes.post("/api/simulation/reset")
-async def api_reset(req):
+def do_reset():
     global SIM
-    owner_only(req)
     for r in ENG.db.all("select id, state from incidents where state != 'CLOSED'"):
         ENG.db.ex("update incidents set state='CLOSED' where id=?", (r["id"],)); ENG.event(r["id"], "demo_reset_closed", "operator:" + OWNER[:6], {"previous_state": r["state"]})
     sha, diff, before = CS.restore(CS.git("rev-parse", "baseline").strip(), "demo reset: restore baseline configuration")
@@ -334,6 +369,11 @@ async def api_reset(req):
     for r in ENG.db.all("select id from work_orders where state not in ('CLOSED','REJECTED','FAILED')"):
         wo = REL.get(r["id"]); REL.transition(wo, "CLOSED", "operator:" + OWNER[:6], "demo reset")
     ENG.event(None, "demo_reset", "operator:" + OWNER[:6], {"config_sha": sha})
+
+
+@routes.post("/api/simulation/reset")
+async def api_reset(req):
+    owner_only(req); do_reset()
     return jresp({"ok": True})
 
 @routes.post("/api/simulation/inject")
@@ -344,10 +384,13 @@ async def api_inject(req):
         if b.get("kind") not in ("thermal", "crah_bearing_wear") or (cur and cur["state"] not in ("CLOSED",)):
             return jresp({"ok": False, "message": "visitors can start the demo incident only when no incident is in progress"}, 403)
         ENG.event(None, "visitor_demo_started", "visitor:" + u[:8], {})
-    k = b.get("kind")
-    if k in ("crah_bearing_wear", "ups_aging", "security_anomaly", "repair_all"):
-        TWIN.inject(k, SIM)
-        if k == "crah_bearing_wear":
+    r = do_inject(b.get("kind"), "demo-control:" + u[:6], b.get("unit"))
+    return jresp(r, 200 if r.get("ok") else 400)
+
+def do_inject(k, actor, unit=None):
+    if k in ("crah_bearing_wear", "ups_aging", "security_anomaly", "repair_all", "grid_price_spike"):
+        TWIN.inject(k, SIM, unit=unit)
+        if k == "crah_bearing_wear" and (unit or "C02") == "C02":
             for w in ["inference_api_07", "inference_api_12", "batch_embed_03"]:
                 if SIM.config["workloads"].get(w, {}).get("rack") == "R17": SIM.surge[w] = 0.15
             SIM._derive()
@@ -356,10 +399,10 @@ async def api_inject(req):
         if k == "security_anomaly":
             for e in TWIN.security[-2:]:
                 ENG.event(None, "security_alert", "agent:security-watcher", {**e, "decision": "escalate to human: no autonomous action on access or firmware events", "policy": "P-F1 firmware changes forbidden for agents"})
-        ENG.event(None, "demo_injection", "demo-control:" + u[:6], {"kind": k}); DIRTY["v"] = True
-        return jresp({"ok": True})
-    if k not in ("thermal", "repair_c02", "arm_post_apply_failure", "repair_rack_faults"): return jresp({"error": "unsupported injection"}, 400)
-    ENG.inject(k); return jresp({"ok": True})
+        ENG.event(None, "demo_injection", actor, {"kind": k, "unit": unit}); DIRTY["v"] = True
+        return {"ok": True}
+    if k not in ("thermal", "repair_c02", "arm_post_apply_failure", "repair_rack_faults"): return {"ok": False, "error": "unsupported injection"}
+    ENG.inject(k); ENG.event(None, "demo_injection", actor, {"kind": k}); return {"ok": True}
 
 @routes.post("/api/simulation/speed")
 async def api_speed(req):
@@ -543,7 +586,10 @@ async def api_prepare(req):
     owner_only(req)
     ENG._cli_checked = 0
     if not ENG.creao_config()["cli"]: return jresp({"ok": False, "message": "save the CREAO CLI key (cr_sk_) first"}, 400)
-    try: out = await ENG.prepare_agents()
+    try:
+        out = await ENG.prepare_agents()
+        for k, n, t in (("ap_analyst", "GRIDPILOT AP Analyst", FIN_TEXT), ("finance_explainer", "GRIDPILOT Finance Explainer", EXPLAIN_TEXT), ("reliability", "GRIDPILOT Reliability Agent", RL.REL_TEXT)):
+            key, aid = await ENG.ensure_agent(k, n, t); out[k] = {"key": key, "agent_id": aid, "status": "ready" if aid else "creating"}
     except Exception as e: return jresp({"ok": False, "message": str(e)[:300]}, 502)
     DIRTY["v"] = True; return jresp({"ok": True, "agents": out})
 
@@ -1060,6 +1106,10 @@ async def creao_tool(req):
     run = ENG.db.one("select provider_run_id from agent_runs where id=?", (tok["run_ref"],))
     actor = "creao:%s" % ((run or {}).get("provider_run_id") or tok["run_ref"])
     ok = 1
+    thought = None
+    if isinstance(args, dict):
+        thought = args.pop("thought", None) or args.pop("reasoning_note", None)
+        thought = str(thought)[:600] if thought else None
     try:
         if tok.get("task") == "reliability": res = await REL.tool(tool, args, tok.get("work_order"), actor)
         elif str(tok.get("task", "")).startswith("v2_"): res = await GHOST.tool(tool, args, actor, tok.get("orch_id"))
@@ -1067,8 +1117,8 @@ async def creao_tool(req):
     except web.HTTPException: raise
     except Exception as e: ok = 0; res = {"error": str(e)[:500]}
     ENG.db.ex("insert into tool_calls(ts,provider,run_ref,incident_id,tool,args,result,ok) values(?,?,?,?,?,?,?,?)",
-              (time.time(), "creao", tok["run_ref"], tok["incident_id"], tool, clipj(args), clipj(res), ok))
-    ENG.event(tok["incident_id"], "agent_tool_call", actor, {"tool": tool, "ok": bool(ok), "run_ref": tok["run_ref"]})
+              (time.time(), "creao", tok["run_ref"], tok["incident_id"], tool, clipj(dict(args, thought=thought) if thought else args), clipj(res), ok))
+    ENG.event(tok["incident_id"], "agent_tool_call", actor, {"tool": tool, "ok": bool(ok), "run_ref": tok["run_ref"], "thought": thought, "summary": STY.interpret_tool(tool, args, res)[:300]})
     return jresp(res, 200 if ok else 400)
 
 @routes.post("/webhooks/creao/{secret}")
