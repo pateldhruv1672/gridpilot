@@ -139,7 +139,7 @@ def plan_view(p):
     return {"plan_id": p["id"], "version": p["version"], "author": p["author"], "status": p["status"], "created": p["created"],
             "actions": p["actions"], "meta": p.get("meta", {}), "policy": ev["policy"], "finance": ev["finance"], "forecast": ev["forecast"],
             "baseline": ev["baseline"], "operational_risk": ev["operational_risk"], "net_expected_benefit_usd": ev["net_expected_benefit_usd"],
-            "assumptions": ev["assumptions"], "model_note": ev["model_note"]}
+            "assumptions": ev["assumptions"], "model_note": ev["model_note"], "sustainability": ev.get("sustainability")}
 
 def incident_detail(inc):
     if not inc: return None

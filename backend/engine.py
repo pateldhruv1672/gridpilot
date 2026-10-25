@@ -578,6 +578,11 @@ class Engine:
         fc, bl = await asyncio.gather(FPOOL.run(FPOOL.engine_forecast, base, cfg, 600.0, focus, tg, rc),
                                       FPOOL.run(FPOOL.engine_forecast, base, None, 600.0, focus, [], rc))
         fc["baseline_energy_kwh"] = bl["energy_kwh"]
+        import twin as TWM
+        hs = (TWM.SITE_START_H + self.sim.t * TWM.SITE_H_PER_SIM_S) % 24; dk = float(fc.get("energy_kwh", 0) - bl["energy_kwh"])
+        sustain = {"energy_delta_kwh": round(dk, 2), "co2_delta_kg": round(dk * TWM.carbon(hs) / 1000, 3),
+                   "water_delta_l": round(dk * (TWM.TOWER_L_PER_KWH * TWM.evap_share(hs) + TWM.grid_water(hs)), 1), "horizon_s": 600,
+                   "note": "vs doing nothing over the same 10-minute forecast; negative = saved. Includes on-site cooling-tower and upstream grid water."}
         fin = FIN.evaluate(acts, self.sim.config, fc, S.CUSTOMERS)
         bfc = dict(bl); bfc["baseline_energy_kwh"] = bl["energy_kwh"]
         base_fin = FIN.evaluate([], self.sim.config, bfc, S.CUSTOMERS)
@@ -586,7 +591,7 @@ class Engine:
         return {"label": label, "actions": acts, "forecast": {k: v for k, v in fc.items() if k != "energy_kwh"},
                 "baseline": {"recover_s": bl["recover_s"], "final_gpu_c": bl["final_gpu_c"], "peak_gpu_c": bl["peak_gpu_c"], "series": bl["series"],
                              "sla_exposure_usd": base_fin["sla_exposure_usd"]},
-                "finance": fin, "policy": pol, "operational_risk": risk,
+                "finance": fin, "policy": pol, "operational_risk": risk, "sustainability": sustain,
                 "net_expected_benefit_usd": round(base_fin["sla_exposure_usd"] - fin["sla_exposure_usd"] - fin["incremental_cost_usd"] - fin["energy_delta_usd"], 2),
                 "assumptions": FIN.ASSUMPTIONS, "computed_at_sim_t": round(self.sim.t, 1),
                 "model_note": "Approximate thermal/airflow simulation forecast (600 s horizon). Not engineering-grade CFD."}

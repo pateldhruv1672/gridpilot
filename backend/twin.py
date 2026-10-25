@@ -21,6 +21,22 @@ def carbon(h):   # gCO2/kWh, solar dip midday, evening ramp
     h %= 24
     return round(260 - 120 * math.exp(-((h - 13) / 3.2) ** 2) + 90 * math.exp(-((h - 19.5) / 2.0) ** 2), 1)
 
+# ---- sustainability model (stated assumptions, shown in the UI) ----
+EVAP_L_PER_KWH = 3.6 / 2.26          # latent heat of water: 1 kWh of heat evaporates ~1.59 L
+COC = 4.0                            # cooling-tower cycles of concentration -> blowdown = evap / (COC - 1)
+TOWER_L_PER_KWH = EVAP_L_PER_KWH * COC / (COC - 1)      # ~2.12 L make-up per kWh of heat rejected evaporatively
+THERMO_L_PER_KWH = 1.9               # water consumed per kWh by thermoelectric generation (gas/coal with wet cooling; US average range 1.2-2.6)
+GAS_G_PER_KWH = 450.0                # intensity of the marginal thermal plant; grid thermal share = carbon / 450
+RTE = 0.92                           # battery round-trip efficiency (losses charged to the battery, not hidden)
+
+def evap_share(h):
+    """Fraction of heat rejected by the evaporative tower: airside economizer carries part of the load at night (cool, dry air)."""
+    h %= 24
+    return round(0.5 + 0.5 * math.exp(-((h - 15) / 5.5) ** 2), 3)
+
+def grid_water(h):  # L per kWh drawn from the grid, consumed upstream at thermal plants
+    return round(THERMO_L_PER_KWH * min(1.0, carbon(h) / GAS_G_PER_KWH), 3)
+
 # id, subsystem, kind, name, serves, failure threshold note
 ASSETS = [
     ("UTIL-A", "energy", "utility_feed", "Utility feed A (12.47 kV)", "pod SFO-01"),
@@ -109,7 +125,7 @@ class Twin:
             self.series.append({"t": round(self.t, 1), "grid_kw": round(self.energy["grid_kw"], 1), "bess_kw": round(self.bess["kw"], 1), "soc": round(self.bess["soc"] * 100, 1),
                                 "tariff": round(tariff(self.site_hour()) * (getattr(self, "spike_mult", 1.0) if self.t < getattr(self, "spike_until", -1) else 1.0), 3), "carbon": carbon(self.site_hour()), "site_h": round(self.site_hour(), 2),
                                 **{"vib_" + k: self.assets[k]["sensors"].get("vibration_mm_s") for k in ("C01", "C02", "C03", "C04")},
-                                "ups_a_runtime": self.assets["UPS-A"]["sensors"].get("runtime_min")})
+                                "ups_a_runtime": self.assets["UPS-A"]["sensors"].get("runtime_min"), **self._sus_point()})
             self.series = self.series[-300:]
         return out
 
@@ -164,19 +180,49 @@ class Twin:
         price = tariff(h) * (getattr(self, "spike_mult", 1.0) if spiking else 1.0)
         b = self.bess; cap = 500.0
         # Energy agent policy (deterministic, autonomous within bounds): shave peak above 640 kW during the peak window, keep a 40% ride-through reserve, recharge off-peak.
-        target = 0.0; mode = "idle"
+        target = 0.0; mode = "idle"; ci = carbon(h)
+        # Energy agent (deterministic, autonomous within bounds), carbon-aware: charge in the midday solar dip, spend the battery
+        # through the evening carbon ramp (which is also the price peak), top up overnight only to protect the 40% ride-through reserve.
         if spiking and b["soc"] > 0.40: target = 250.0; mode = "price_spike_discharge"
-        elif PEAK[0] <= h < PEAK[1] and b["soc"] > 0.40: target = min(250.0, max(0.0, fac - 560.0) + 60.0); mode = "peak_shave"
-        elif price <= 0.09 and b["soc"] < 0.95: target = -150.0; mode = "charge"
+        elif PEAK[0] <= h < PEAK[1] and ci >= 280 and b["soc"] > 0.40: target = 130.0; mode = "carbon_peak_shave"
+        elif ci <= 170 and b["soc"] < 0.95: target = -150.0; mode = "solar_charge"
+        elif price <= 0.09 and b["soc"] < 0.50: target = -100.0; mode = "reserve_charge"
         b["kw"] += (target - b["kw"]) * min(1, dt / 4)
-        b["soc"] = float(np.clip(b["soc"] - b["kw"] * dt / 3600 / cap * 60, 0, 1))   # x60: sim minute = site hour, so energy moves at site-clock pace
+        eff = (RTE ** 0.5) if b["kw"] < 0 else 1 / (RTE ** 0.5)       # charging stores less than it draws; discharging drains more than it delivers
+        b["soc"] = float(np.clip(b["soc"] - b["kw"] * eff * dt / 3600 / cap * 60, 0, 1))   # x60: sim minute = site hour, so energy moves at site-clock pace
         if mode != b["mode"]: b["mode"] = mode; self.mode_changed = (round(self.t, 1), mode)
         grid = fac - b["kw"]; self.energy["grid_kw"] = grid
         site_hours = dt * SITE_H_PER_SIM_S
         self.energy["cost_usd"] += grid * site_hours * price; self.energy["cost_no_bess_usd"] += fac * site_hours * price
         self.energy["carbon_kg"] += grid * site_hours * carbon(h) / 1000
+        # sustainability ledger: actual vs the same load with no battery (the energy agent's counterfactual)
+        s = self.__dict__.setdefault("sus", {})
+        for k in ("carbon_kg", "carbon_no_bess_kg", "water_site_l", "water_grid_l", "water_grid_no_bess_l", "it_kwh", "fac_kwh"): s.setdefault(k, 0.0)
+        s["carbon_kg"] += grid * site_hours * carbon(h) / 1000
+        s["carbon_no_bess_kg"] += fac * site_hours * carbon(h) / 1000
+        s["water_site_l"] += fac * site_hours * TOWER_L_PER_KWH * evap_share(h)      # all facility power ends up as heat to reject
+        s["water_grid_l"] += max(0.0, grid) * site_hours * grid_water(h)
+        s["water_grid_no_bess_l"] += fac * site_hours * grid_water(h)
+        s["it_kwh"] += float(sim.it_kw) * site_hours; s["fac_kwh"] += fac * site_hours
         b["saved_usd"] = self.energy["cost_no_bess_usd"] - self.energy["cost_usd"]
         b["throughput_kwh"] += abs(b["kw"]) * site_hours
+
+    def _sus_point(self):
+        s = self.__dict__.get("sus") or {}
+        return {"co2_avoided_kg": round(s.get("carbon_no_bess_kg", 0) - s.get("carbon_kg", 0), 2),
+                "water_saved_l": round(s.get("water_grid_no_bess_l", 0) - s.get("water_grid_l", 0), 1)}
+
+    def sustainability(self):
+        s = self.__dict__.get("sus") or {}; h = self.site_hour(); it = max(1e-6, s.get("it_kwh", 0))
+        p = self._sus_point()
+        return {**p, "co2_emitted_kg": round(s.get("carbon_kg", 0), 1), "co2_no_battery_kg": round(s.get("carbon_no_bess_kg", 0), 1),
+                "water_site_l": round(s.get("water_site_l", 0), 0), "water_grid_l": round(s.get("water_grid_l", 0), 0),
+                "wue_l_per_kwh": round(s.get("water_site_l", 0) / it, 2), "it_mwh": round(it / 1000, 2), "facility_mwh": round(s.get("fac_kwh", 0) / 1000, 2),
+                "carbon_now_g_per_kwh": carbon(h), "grid_water_now_l_per_kwh": grid_water(h), "evap_share_now": evap_share(h),
+                "assumptions": ["Counterfactual: the same facility load drawn straight from the grid (no battery). Savings come from the energy agent's carbon-aware battery dispatch, net of %d%% round-trip losses." % round(RTE * 100),
+                                "Grid carbon follows a time-of-day curve (solar dip at midday, evening ramp). Grid water = %.1f L/kWh x thermal share (carbon / %d g)." % (THERMO_L_PER_KWH, GAS_G_PER_KWH),
+                                "On-site water: heat rejected x %.2f L/kWh (evaporation 1.59 L/kWh + blowdown at %d cycles), reduced at night when the economizer carries part of the load." % (TOWER_L_PER_KWH, COC),
+                                "Simulated site; one sim minute is one site hour. Order-of-magnitude, not metered."]}
 
     # ------------------------------------------------------------ views
     def subsystem_health(self, preds):
@@ -209,4 +255,4 @@ class Twin:
                             "maintenance": a.get("maint")} for a in self.assets.values()],
                 "bess": {k: (round(v, 3) if isinstance(v, float) else v) for k, v in self.bess.items()},
                 "energy": {k: round(v, 3) for k, v in self.energy.items()},
-                "security": self.security[-12:], "series": self.series[-150:]}
+                "security": self.security[-12:], "series": self.series[-150:], "sustainability": self.sustainability()}
