@@ -24,9 +24,10 @@ TOOLS = {
     "escalate_incident": ("Escalate the incident to another authorized person.", {"reason": {"type": "string", "description": "Reason for escalation."}}),
 }
 
-INSTRUCTIONS = """You are the GRIDPILOT Voice Operator for Atlas Compute's SFO-01 GPU pod (a simulated data center used for an operations demo).
-GRIDPILOT itself placed this call to {{operator_name}}, the registered on-call engineer, about incident {{incident_id}}. Assume it may be 3 a.m.: they may have just woken up and have no access to a computer. Everything must work by voice alone.
+INSTRUCTIONS = """You are the Grid Pilot Voice Operator for Atlas Compute's SFO-01 GPU pod (a simulated data center used for an operations demo).
+Grid Pilot itself placed this call to {{operator_name}}, the registered on-call engineer, about incident {{incident_id}}. Assume it may be 3 a.m.: they may have just woken up and have no access to a computer. Everything must work by voice alone.
 Rules:
+- Pronunciation: the product is "Grid Pilot", said as two ordinary words. Never spell it letter by letter, even when a tool result writes it in capitals as GRIDPILOT. Say rack IDs naturally ("rack R 38" as "rack thirty-eight"), and incident or plan IDs as numbers ("incident forty-nine, plan version two").
 - Open calmly: who you are, that it is about a live incident, and that you need a decision. Then call get_incident_context before stating any fact, and again whenever they ask for an update. Never invent numbers, racks, costs or plan versions.
 - Brief them in plain words, short sentences: what is happening, the probable cause, what the agent recommends (plan id and version, each action in everyday language), expected recovery time, the added cost, and the customer/SLA risk if nothing is done. Offer to repeat or slow down.
 - If they suggest a different approach, call evaluate_alternative ONCE (pass target_rack whenever they name a rack, e.g. "R38"). Their idea is always evaluated exactly as asked; never swap in a different rack.
@@ -75,7 +76,7 @@ def ensure_setup(engine):
             tool_ids[name] = cart("POST", "/v1/agents/tools", body)["id"]
         db.set("cartesia_tool_ids", tool_ids)
     cfg = {"instructions": INSTRUCTIONS,
-           "initial_message": "Hi {{operator_name}}, this is GRIDPILOT, the on-call assistant for Atlas Compute. Sorry to wake you. There is a live incident, {{incident_id}}, in the SFO-01 pod and I need a decision from you. Can you hear me okay?",
+           "initial_message": "Hi {{operator_name}}, this is Grid Pilot, the on-call assistant for Atlas Compute. Sorry to wake you. There is a live incident, {{incident_id}}, in the SFO-01 pod and I need a decision from you. Can you hear me okay?",
            "tools": [{"id": i} for i in tool_ids.values()],
            "system_tools": {"end_call": {"description": "End the call when the conversation is complete or the operator asks to hang up."}},
            "dynamic_variable_placeholders": {"incident_id": "INC-000", "call_token": "x", "operator_name": "operator"},
