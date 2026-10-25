@@ -186,7 +186,7 @@ class Twin:
         if spiking and b["soc"] > 0.40: target = 250.0; mode = "price_spike_discharge"
         elif PEAK[0] <= h < PEAK[1] and ci >= 280 and b["soc"] > 0.40: target = 130.0; mode = "carbon_peak_shave"
         elif ci <= 170 and b["soc"] < 0.95: target = -150.0; mode = "solar_charge"
-        elif price <= 0.09 and b["soc"] < 0.50: target = -100.0; mode = "reserve_charge"
+        elif b["soc"] < 0.40: target = -100.0; mode = "reserve_charge"          # only to restore the ride-through reserve
         b["kw"] += (target - b["kw"]) * min(1, dt / 4)
         eff = (RTE ** 0.5) if b["kw"] < 0 else 1 / (RTE ** 0.5)       # charging stores less than it draws; discharging drains more than it delivers
         b["soc"] = float(np.clip(b["soc"] - b["kw"] * eff * dt / 3600 / cap * 60, 0, 1))   # x60: sim minute = site hour, so energy moves at site-clock pace

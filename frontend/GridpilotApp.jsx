@@ -844,6 +844,10 @@ function actionText(a) {
   return a.type;
 }
 
+const fmtL = (l) => { const a = Math.abs(l || 0); return (a >= 1000 ? (a / 1000).toFixed(a >= 10000 ? 0 : 1) + ' m³' : Math.round(a) + ' L'); };
+const fmtKg = (k) => { const a = Math.abs(k || 0); return a >= 1000 ? (a / 1000).toFixed(2) + ' t' : a >= 10 ? Math.round(a) + ' kg' : a.toFixed(1) + ' kg'; };
+const signed = (v, f) => (v < 0 ? '−' : v > 0 ? '+' : '') + f(v);
+
 function Label({ children, color }) { return <div style={{ font: '600 9.5px ' + MONO, letterSpacing: '0.16em', textTransform: 'uppercase', color: color || C.dim }}>{children}</div>; }
 function Btn({ children, onClick, tone = 'ghost', disabled, title, small }) {
   const tones = { primary: { background: C.cyan, color: '#04121a', border: '1px solid ' + C.cyan }, danger: { background: 'transparent', color: C.red, border: '1px solid rgba(255,89,110,.45)' },
@@ -1173,7 +1177,7 @@ function IncidentPanel({ g, setModal, toast }) {
         {[['Forecast recovery', plan.forecast.recover_s != null ? '≈' + plan.forecast.recover_s + 's' : 'not within 10 min', plan.forecast.recover_s != null ? C.mint : C.red],
           ['End GPU (fcst)', plan.forecast.final_gpu_c + '°C', C.text], ['Incremental cost', fmt$(plan.finance.incremental_cost_usd), C.text],
           ['SLA exposure', fmt$(plan.finance.sla_exposure_usd) + ' vs ' + fmt$(plan.baseline.sla_exposure_usd) + ' idle', C.text], ['Operational risk', plan.operational_risk, plan.operational_risk === 'low' ? C.mint : C.amber],
-          ['Policy', plan.policy.decision.replace('_', ' '), plan.policy.decision === 'AUTO_ALLOWED' ? C.mint : plan.policy.decision === 'FORBIDDEN' ? C.red : C.amber]].concat(st.desk && st.desk.budgets['5200'] ? [['Burst budget after', fmt$(st.desk.budgets['5200'].budget - st.desk.budgets['5200'].actual - plan.finance.incremental_cost_usd) + ' of ' + fmt$(st.desk.budgets['5200'].budget), (st.desk.budgets['5200'].budget - st.desk.budgets['5200'].actual - plan.finance.incremental_cost_usd) < 0 ? C.red : C.text]] : []).map(([k, v, c]) =>
+          ['Policy', plan.policy.decision.replace('_', ' '), plan.policy.decision === 'AUTO_ALLOWED' ? C.mint : plan.policy.decision === 'FORBIDDEN' ? C.red : C.amber]].concat(st.desk && st.desk.budgets['5200'] ? [['Burst budget after', fmt$(st.desk.budgets['5200'].budget - st.desk.budgets['5200'].actual - plan.finance.incremental_cost_usd) + ' of ' + fmt$(st.desk.budgets['5200'].budget), (st.desk.budgets['5200'].budget - st.desk.budgets['5200'].actual - plan.finance.incremental_cost_usd) < 0 ? C.red : C.text]] : []).concat(plan.sustainability ? [['Water · CO₂ vs do-nothing', signed(plan.sustainability.water_delta_l, fmtL) + ' · ' + signed(plan.sustainability.co2_delta_kg, fmtKg), plan.sustainability.water_delta_l <= 0 ? C.mint : C.amber]] : []).map(([k, v, c]) =>
           <div key={k} className="px-2.5 py-2 rounded" style={{ background: C.p2, border: '1px solid ' + C.line }}><Label>{k}</Label><div style={{ font: '500 12px ' + MONO, color: c, marginTop: 3 }}>{v}</div></div>)}
       </div>
       <div className="mt-2" style={{ font: '10.5px/1.5 ' + SANS, color: C.mute }}>{plan.policy.plan_rules.concat(plan.policy.actions).filter(r => r.decision !== 'AUTO_ALLOWED').map(r => r.rule).filter((x, i, a) => a.indexOf(x) === i).join(' · ')}</div>
@@ -1378,6 +1382,16 @@ function TwinTab({ g, toast, narrow }) {
               <div style={{ font: '600 11px ' + SANS, color: C.text }}>{e.kind === 'badge' ? 'Access anomaly' : 'Firmware change attempt'} · {e.where}</div><div style={{ font: '10px/1.45 ' + MONO, color: C.mute }}>{e.who} · {e.detail}</div><div style={{ font: '9.5px ' + MONO, color: C.amber, marginTop: 2 }}>escalated to human · agents may not act on access or firmware</div></div>)
               : <div style={{ font: '11px ' + SANS, color: C.mute }}>No anomalies. Badge events, door states and management-plane firmware changes are watched continuously; anything unusual goes straight to a human.</div>}</div></Panel>
         </div>
+        {tw.sustainability && (() => { const s = tw.sustainability; const ser = tw.series || [];
+          const susOpt = { ...lineOpt([{ name: 'CO₂ avoided (kg)', data: ser.filter(p => p.co2_avoided_kg != null).map(p => [p.t, p.co2_avoided_kg]), color: C.mint, area: true }, { name: 'water saved (L)', data: ser.filter(p => p.water_saved_l != null).map(p => [p.t, p.water_saved_l]), color: C.cyan }]),
+            yAxis: [{ type: 'value', scale: true, ...axisStyle }, { type: 'value', scale: true, ...axisStyle, splitLine: { show: false } }] };
+          if (susOpt.series[1]) susOpt.series[1].yAxisIndex = 1;
+          return <Panel style={{ padding: 10 }}><div className="flex items-baseline gap-2 flex-wrap"><Label color={C.mint}>Sustainability · water and carbon</Label><span style={{ font: '10px ' + MONO, color: C.dim }}>energy agent vs the same load with no battery · simulated</span></div>
+            <div className="grid gap-2 mt-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))' }}>{[['CO₂ avoided', signed(s.co2_avoided_kg, fmtKg), s.co2_avoided_kg >= 0 ? C.mint : C.amber], ['Water saved (grid)', signed(s.water_saved_l, fmtL), s.water_saved_l >= 0 ? C.mint : C.amber], ['CO₂ emitted', fmtKg(s.co2_emitted_kg), C.text], ['Site water (cooling)', fmtL(s.water_site_l), C.text], ['WUE', s.wue_l_per_kwh + ' L/kWh', C.text], ['Grid now', Math.round(s.carbon_now_g_per_kwh) + ' g · ' + s.grid_water_now_l_per_kwh + ' L/kWh', C.text]].map(([k, v, c]) => <div key={k} className="px-2 py-1.5 rounded" style={{ background: C.p2, border: '1px solid ' + C.line }}><Label>{k}</Label><div style={{ font: '500 12.5px ' + MONO, color: c, marginTop: 2 }}>{v}</div></div>)}</div>
+            <EChart option={susOpt} height={130} />
+            <div style={{ font: '10px/1.5 ' + MONO, color: C.mute }}>battery mode <b style={{ color: C.text }}>{tw.bess.mode.replace(/_/g, ' ')}</b> · charges in the midday solar dip, discharges through the evening carbon ramp, keeps a 40% reserve</div>
+            <details className="mt-1"><summary style={{ font: '10px ' + MONO, color: C.dim, cursor: 'pointer' }}>how this is computed</summary><ul className="mt-1 flex flex-col gap-0.5" style={{ font: '10.5px/1.5 ' + SANS, color: C.mute }}>{s.assumptions.map((a, i) => <li key={i}>· {a}</li>)}</ul></details>
+          </Panel>; })()}
       </div>
       <div className="flex flex-col gap-3 min-h-0 overflow-auto">
         <Panel style={{ padding: 10 }}><Label color={C.mint}>Predictive work orders</Label>
@@ -2489,6 +2503,9 @@ function UserDiv() {
       <Metric label="IT · facility power" value={tot ? tot.it_kw.toFixed(0) : '—'} unit={'kW · ' + (tot ? tot.facility_kw.toFixed(0) : '—') + ' kW'} sub="64 racks · 512 GPUs (simulated)" />
       <Metric label="GPU utilization" value={tot ? (tot.gpu_util * 100).toFixed(1) : '—'} unit="%" sub={crit + ' critical · ' + elev + ' elevated racks'} tone={crit ? C.red : undefined} />
       <Metric label="PUE" value={tot ? tot.pue.toFixed(3) : '—'} unit="" sub={snap ? 'C02 effectiveness ' + Math.round(snap.cooling[1].effectiveness * 100) + '%' : ''} tone={tot && tot.pue > 1.41 ? C.amber : undefined} />
+      {(() => { const s = g.twinRef.current && g.twinRef.current.sustainability; if (!s) return null; const pos = (v) => v > 0.05 ? C.mint : v < -0.05 ? C.amber : undefined;
+        return <><Metric label="CO₂ avoided" value={(s.co2_avoided_kg < 0 ? '−' : '') + fmtKg(s.co2_avoided_kg).split(' ')[0]} unit={fmtKg(s.co2_avoided_kg).split(' ')[1]} sub={'grid ' + Math.round(s.carbon_now_g_per_kwh) + ' gCO₂/kWh now · emitted ' + fmtKg(s.co2_emitted_kg)} tone={pos(s.co2_avoided_kg)} />
+          <Metric label="Water saved" value={(s.water_saved_l < 0 ? '−' : '') + fmtL(s.water_saved_l).split(' ')[0]} unit={fmtL(s.water_saved_l).split(' ')[1]} sub={'WUE ' + s.wue_l_per_kwh + ' L/kWh · site used ' + fmtL(s.water_site_l)} tone={pos(s.water_saved_l)} /></>; })()}
       <Metric label="SLA risk · exposure" value={breaches} unit={breaches === 1 ? 'breach' : 'breaches'} sub={exposure ? fmt$(exposure) + '/min if sustained (conditional)' : 'no conditional exposure'} tone={breaches ? C.red : C.mint} />
     </div>
     {tab === 'control' && <ControlRoom g={g} setModal={setModal} toast={toast} narrow={W < 900} />}

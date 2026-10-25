@@ -145,3 +145,15 @@ GRIDPILOT keeps the physical layer behind one tool API, so production is the sam
 
 - Forecast simulations (plan evaluation, maintenance what-ifs) run in a forkserver process pool (`backend/forecast_pool.py`, 3 workers) instead of threads. In threads they held the GIL and starved the asyncio loop: during the compound storm the loop managed about one tick every 4 s and dashboards stopped updating. Results are identical to the in-thread versions (verified series-for-series).
 - State is pushed as `state_patch` messages containing only the sections that changed since the last push to that client (about 100 KB instead of 500 KB), at most once per second; twin and GPU data stream in ticks. Sends are non-blocking per client, so one slow browser can never stall the simulation loop.
+
+
+## Sustainability: water and carbon
+
+The energy agent dispatches the site battery carbon-aware: it charges in the midday solar dip, discharges through the evening carbon ramp (also the price peak) and only tops up to protect a 40% ride-through reserve. The twin keeps a ledger against a counterfactual of the same load drawn straight from the grid with no battery, net of 92% round-trip losses:
+
+- **CO₂ avoided** = grid energy x time-of-day carbon intensity, counterfactual minus actual.
+- **Water saved** = upstream grid water (1.9 L/kWh x thermal share of the mix), counterfactual minus actual.
+- **Site water / WUE**: heat rejected x 2.12 L/kWh (1.59 L/kWh evaporation + blowdown at 4 cycles), reduced at night when the economizer carries part of the load.
+- Every plan evaluation also reports its water and CO₂ delta versus doing nothing over the 10-minute forecast, positive or negative.
+
+All simulated; order-of-magnitude, not metered. Assumptions are shown in the UI under "how this is computed".
