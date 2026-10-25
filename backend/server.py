@@ -35,7 +35,7 @@ OPTIONS = {}           # incident -> list of evaluated options (summaries) for c
 DIRTY = {"v": True}
 ENG.notify = lambda: DIRTY.__setitem__("v", True)
 import finance_desk as FD
-import twin as TW, predict as PR, reliability as RL, gpus as GPUS, ghost as GHM
+import twin as TW, predict as PR, reliability as RL, gpus as GPUS, ghost as GHM, story as STY
 DESK = FD.Desk(ENG.db, notify=lambda: DIRTY.__setitem__("v", True), event=ENG.event)
 ENG.desk = DESK
 if not ENG.db.one("select id from ap_decisions where kind='recommendation' limit 1"): DESK.autonomous_pass()
@@ -259,6 +259,13 @@ async def api_gpu_rack(req):
     if FLEET.last is None: FLEET.compute(SIM)
     try: return jresp(FLEET.rack(req.match_info["rid"].upper()))
     except Exception as e: return jresp({"error": str(e)}, 400)
+
+@routes.post("/api/trace/{kind}/{ident}/explanation")
+async def api_trace_expl(req):
+    owner_only(req); b = await req.json()
+    ENG.db.ex("insert or replace into trace_expl values(?,?,?,?)", (req.match_info["kind"] + ":" + req.match_info["ident"], time.time(), str(b.get("chat_id") or "")[:60], str(b.get("text") or "")[:8000]))
+    ENG.event(None, "trace_explained", "mana:explainer", {"trace": req.match_info["kind"] + ":" + req.match_info["ident"], "chat_id": b.get("chat_id")}); DIRTY["v"] = True
+    return jresp({"ok": True})
 
 @routes.get("/api/ghost/digest")
 async def api_ghost_digest(req): owner_only(req); return jresp(GHOST.digest())
@@ -669,7 +676,7 @@ def _act_txt(a):
 def _norm_acts(acts):
     return sorted(json.dumps({k: v for k, v in a.items() if k in ("type", "workload", "to_rack", "rack", "watts", "unit", "fan_pct")}, sort_keys=True) for a in (acts or []))
 
-def build_trace(kind, ident):
+def _build_trace_raw(kind, ident):
     nodes, edges, spine = [], [], []
     def node(nid, kind_, title, sub="", status="done", ts=None, actor="", metrics=None, detail="", row=0, col=None, tag=None):
         nodes.append({"id": nid, "kind": kind_, "title": title, "sub": sub, "status": status, "ts": ts, "actor": actor, "metrics": metrics or {}, "detail": str(detail)[:1500], "row": row, "col": col, "tag": tag}); return nid
@@ -805,6 +812,46 @@ def build_trace(kind, ident):
         if paid: chain(node("pay", "action", "Payment run", "%d payments today" % paid, "done", None, "treasury"))
         return {"kind": kind, "id": ident, "title": "AP review " + ident, "state": r["status"], "nodes": nodes, "edges": edges}
     return {"nodes": [], "edges": [], "title": "unknown"}
+
+ENG.db.c.execute("create table if not exists trace_expl(key text primary key, ts real, chat_id text, text text)"); ENG.db.c.commit()
+
+def _collapse_options(tr):
+    nodes, edges = tr.get("nodes", []), tr.get("edges", [])
+    opt_ids = {n["id"] for n in nodes if n["kind"] == "option"}
+    if not opt_ids: return tr
+    groups = {}
+    for e in edges:
+        if e["kind"] == "option" and e["target"] in opt_ids: groups.setdefault(e["source"], []).append(e["target"])
+    byid = {n["id"]: n for n in nodes}; new_nodes = [n for n in nodes if n["id"] not in opt_ids]; new_edges = []
+    remap = {}
+    for parent, ids in groups.items():
+        gid = "opts-" + parent; ch = next((byid[i] for i in ids if byid[i].get("tag") == "chosen"), None)
+        failed = sum(1 for i in ids if byid[i]["status"] == "failed")
+        new_nodes.append({"id": gid, "kind": "option", "title": "%d options compared" % len(ids), "sub": ("chosen: " + ch["title"]) if ch else "no option chosen", "status": "failed" if failed and tr.get("kind") == "finance" and failed == len(ids) else "done",
+                          "ts": byid[ids[0]].get("ts"), "actor": byid[ids[0]].get("actor"), "metrics": ({"chosen": "option " + ch["sub"].split()[-1]} if ch and ch.get("sub", "").startswith("option") else {}) if tr.get("kind") != "finance" else {"differs": failed},
+                          "detail": "Click to see every option side by side, with why each one was rejected.", "row": 1, "col": byid[parent].get("col"), "tag": "options", "count": len(ids)})
+        new_edges.append({"source": parent, "target": gid, "kind": "option"})
+        for i in ids: remap[i] = gid
+    for e in edges:
+        if e["kind"] == "option" and e["target"] in opt_ids: continue
+        e2 = dict(e); e2["source"] = remap.get(e["source"], e["source"]); e2["target"] = remap.get(e["target"], e["target"]); new_edges.append(e2)
+    tr["nodes"], tr["edges"] = new_nodes, new_edges
+    return tr
+
+def build_trace(kind, ident):
+    tr = _build_trace_raw(kind, ident)
+    try:
+        if kind == "wo":
+            wo = REL.get(ident); tr["story"] = STY.story_wo(wo, ENG.db, None) if wo else None
+        elif kind == "incident":
+            inc = incident_detail(ENG.incident(ident)); tr["story"] = STY.story_incident(inc, ENG.db) if inc else None
+        elif kind == "finance":
+            r = ENG.db.one("select * from agent_runs where id=?", (ident,)); tr["story"] = STY.story_finance(r, ENG.db, DESK) if r else None
+    except Exception as e:
+        traceback.print_exc(); tr["story"] = {"headline": "Interpretation unavailable: %s" % e, "status": "failed", "steps": [], "caveats": [], "next": [], "options": [], "agent_steps": []}
+    ex = ENG.db.one("select * from trace_expl where key=?", (kind + ":" + str(ident),))
+    tr["explanation"] = dict(ex) if ex else None
+    return _collapse_options(tr)
 
 def loops():
     out = []

@@ -1150,7 +1150,7 @@ function TraceGraph({ trace, onSelect, selId }) {
     const parentOf = {}; trace.edges.forEach(e => { if (e.kind === 'option') parentOf[e.target] = e.source; });
     const kids = {}; const pos = {};
     trace.nodes.forEach(n => { if (!n.row) pos[n.id] = { x: (n.col || 0) * 262, y: 0 }; });
-    trace.nodes.forEach(n => { if (n.row) { const p = parentOf[n.id]; const i = (kids[p] = (kids[p] || 0) + 1) - 1; const px = (pos[p] || { x: (n.col || 0) * 262 }).x; pos[n.id] = { x: px + ((i % 5) - 2) * 210, y: 150 + Math.floor(i / 5) * 128 }; } });
+    trace.nodes.forEach(n => { if (n.row) { const p = parentOf[n.id]; const i = (kids[p] = (kids[p] || 0) + 1) - 1; const px = (pos[p] || { x: (n.col || 0) * 262 }).x; pos[n.id] = n.tag === 'options' ? { x: px, y: 150 } : { x: px + ((i % 5) - 2) * 210, y: 150 + Math.floor(i / 5) * 128 }; } });
     const nodes = trace.nodes.map(n => { const isNew = !seen.current[n.id]; const delay = isNew && first.current ? (n.row ? 600 + (kids[parentOf[n.id]] ? 0 : 0) + (n.col || 0) * 60 : (n.col || 0) * 120) : 0; seen.current[n.id] = 1;
       return { id: n.id, type: 'trace', position: pos[n.id] || { x: 0, y: 0 }, data: { n, delay }, selected: n.id === selId, draggable: false }; });
     first.current = false;
@@ -1187,13 +1187,74 @@ const LOOPS_INFO = [
   ['Security', 'access + firmware', 'anomaly → escalate to human (no autonomous action)'],
 ];
 
+const SSC = { done: C.mint, active: C.cyan, failed: C.red };
+function StoryPanel({ g, trace, sel }) {
+  const s = trace && trace.story; const [busy, setBusy] = React.useState(null); const owner = userId === ownerId;
+  if (!trace) return <div style={{ font: '11.5px ' + SANS, color: C.mute }}>Loading…</div>;
+  if (!s) return <div style={{ font: '11.5px ' + SANS, color: C.mute }}>No interpretation for this loop.</div>;
+  const explain = async () => {
+    setBusy('asking Mana');
+    try {
+      const brief = { title: trace.title, state: trace.state, story: { headline: s.headline, steps: s.steps, caveats: s.caveats, next: s.next, agent_words: s.agent_words, options: (s.options || []).slice(0, 14), agent_steps: (s.agent_steps || []).slice(0, 30) } };
+      const prompt = 'You are explaining a GRIDPILOT decision loop (simulated data-center operations, CREAO agents, human approval) to an operator who was not watching. Using ONLY the recorded data below, write a clear explanation in plain English: 1) what happened, in order, 2) why the agent chose what it chose and why the alternatives lost, 3) whether the outcome was good and what went wrong if anything, 4) what the operator should do now. Quote numbers. No headings, no bullet symbols, 120 to 220 words, short paragraphs. Do not use tools. Data: ' + JSON.stringify(brief);
+      const chatId = await mana.mintChatId(); const h = await mana.ask(chatId, prompt, [], 'auto'); setBusy('Mana is reading the trace');
+      const r = await h.finalResult(); await g.api('/api/trace/' + trace.kind + '/' + trace.id + '/explanation', 'POST', { text: r.text, chat_id: chatId });
+      const t = await g.api('/api/trace/' + trace.kind + '/' + trace.id); trace.explanation = t.explanation; setBusy(null);
+    } catch (e) { setBusy('failed: ' + e.message); }
+  };
+  const ex = trace.explanation;
+  return <div className="flex flex-col gap-3">
+    <div className="p-3 rounded-lg" style={{ background: SSC[s.status] + '10', border: '1px solid ' + SSC[s.status] + '55' }}>
+      <Label color={SSC[s.status]}>{s.status === 'failed' ? 'Outcome · went wrong' : s.status === 'active' ? 'In progress' : 'Outcome'}</Label>
+      <div style={{ font: '600 14px/1.35 ' + SANS, color: C.text, marginTop: 3 }}>{s.headline}</div>
+      {s.decision && s.decision.chosen && <div style={{ font: '11px/1.5 ' + SANS, color: C.mute, marginTop: 4 }}>Chosen action: <b style={{ color: C.text, fontWeight: 600 }}>{s.decision.chosen}</b>{s.decision.why ? ' · ' + s.decision.why : ''}</div>}
+    </div>
+    <div><Label>What happened</Label>
+      <ol className="mt-1.5 flex flex-col gap-2" style={{ listStyle: 'none', padding: 0, margin: 0 }}>{s.steps.map((x, i) => <li key={i} className="flex gap-2.5">
+        <span style={{ flexShrink: 0, width: 18, height: 18, borderRadius: 18, border: '1px solid ' + C.line2, font: '600 9.5px/16px ' + MONO, color: C.mute, textAlign: 'center' }}>{i + 1}</span>
+        <div className="min-w-0"><div style={{ font: '600 11px ' + SANS, color: x.title === 'Outcome' ? SSC[s.status] : C.text }}>{x.title}</div><div style={{ font: '11.5px/1.5 ' + SANS, color: '#c3d1e0' }}>{x.text}</div></div></li>)}</ol></div>
+    {s.caveats && s.caveats.length > 0 && <div><Label color={C.amber}>Worth knowing</Label>{s.caveats.map((x, i) => <div key={i} style={{ font: '11.5px/1.5 ' + SANS, color: '#e8d6b3', marginTop: 4 }}>{x}</div>)}</div>}
+    {s.next && s.next.length > 0 && <div><Label color={C.cyan}>What to do now</Label>{s.next.map((x, i) => <div key={i} className="flex gap-2" style={{ font: '11.5px/1.5 ' + SANS, color: C.text, marginTop: 4 }}><span style={{ color: C.cyan }}>→</span><span>{x}</span></div>)}</div>}
+    {s.agent_words && <div className="p-2.5 rounded" style={{ background: 'rgba(67,217,245,.05)', border: '1px solid rgba(67,217,245,.18)' }}><Label color={C.cyan}>The agent, in its own words</Label><div style={{ font: '11.5px/1.55 ' + SANS, color: '#c7d6e6', marginTop: 4, whiteSpace: 'pre-wrap' }}>{s.agent_words}</div></div>}
+    <div className="p-2.5 rounded" style={{ background: 'rgba(180,156,255,.05)', border: '1px solid rgba(180,156,255,.22)' }}>
+      <div className="flex items-center gap-2"><Label color="#b49cff">Mana's explanation</Label>{owner && <span className="ml-auto"><Btn small disabled={!!busy && !String(busy).startsWith('failed')} onClick={explain}>{ex ? 'Explain again' : 'Explain with Mana'}</Btn></span>}</div>
+      {busy && <div className={String(busy).startsWith('failed') ? '' : 'gp-dot-live'} style={{ font: '10px ' + MONO, color: String(busy).startsWith('failed') ? C.red : '#b49cff', marginTop: 4 }}>{busy}…</div>}
+      {ex ? <><div style={{ font: '11.5px/1.6 ' + SANS, color: '#d9d2f5', marginTop: 5, whiteSpace: 'pre-wrap' }}>{ex.text}</div><div style={{ font: '9.5px ' + MONO, color: C.dim, marginTop: 4 }}>{ago(ex.ts)} · written by a Mana agent from the recorded trace</div></>
+        : !busy && <div style={{ font: '10.5px/1.5 ' + SANS, color: C.mute, marginTop: 4 }}>A Mana agent reads this whole trace and writes a narrative for someone who was not watching.</div>}
+    </div>
+  </div>;
+}
+function OptionsTable({ rows, kind }) {
+  if (!rows || !rows.length) return null;
+  const fin = kind === 'finance';
+  return <div className="overflow-auto" style={{ maxHeight: '100%' }}>
+    <table className="w-full" style={{ borderCollapse: 'collapse', font: '10.5px/1.45 ' + MONO }}>
+      <thead><tr style={{ color: C.dim, textAlign: 'left' }}>{(fin ? ['#', 'Recommendation', 'Cross-check'] : ['#', 'Option the agent simulated', 'Peak', 'Doing nothing', 'Cost', 'Policy', 'Verdict']).map(h => <th key={h} style={{ padding: '4px 6px', fontWeight: 600, borderBottom: '1px solid ' + C.line, position: 'sticky', top: 0, background: C.p1 }}>{h}</th>)}</tr></thead>
+      <tbody>{rows.map(r => { const dup = /duplicate/.test(r.verdict || ''); return <tr key={r.n} style={{ background: r.verdict === 'chosen' ? 'rgba(79,224,165,.08)' : 'transparent', opacity: dup ? 0.45 : 1 }}>
+        <td style={{ padding: '4px 6px', color: C.dim, verticalAlign: 'top' }}>{r.n}</td>
+        <td style={{ padding: '4px 6px', color: C.text, verticalAlign: 'top' }}>{r.label}{fin && r.reason ? <div style={{ font: '10px/1.45 ' + SANS, color: C.mute }}>{r.reason}</div> : null}</td>
+        {!fin && <><td style={{ padding: '4px 6px', color: r.verdict === 'chosen' ? C.mint : C.text, whiteSpace: 'nowrap', verticalAlign: 'top' }}>{r.peak != null ? r.peak + '°C' : r.recover != null ? r.recover + 's' : '—'}</td>
+          <td style={{ padding: '4px 6px', color: C.mute, whiteSpace: 'nowrap', verticalAlign: 'top' }}>{r.cf != null ? r.cf + '°C' : '—'}</td>
+          <td style={{ padding: '4px 6px', color: C.mute, whiteSpace: 'nowrap', verticalAlign: 'top' }}>{fmt$(r.cost)}</td><td style={{ padding: '4px 6px', color: r.policy === 'FORBIDDEN' ? C.red : r.policy === 'AUTO_ALLOWED' ? C.mint : C.amber, whiteSpace: 'nowrap', verticalAlign: 'top', fontSize: 9.5 }}>{(r.policy || '').replace('_', ' ').toLowerCase()}</td></>}
+        <td style={{ padding: '4px 6px', color: r.verdict === 'chosen' ? C.mint : r.chosen === false && fin ? C.red : C.mute, verticalAlign: 'top', fontFamily: SANS, fontSize: 11 }}>{r.verdict === 'chosen' ? '✓ chosen' : r.verdict}</td></tr>; })}</tbody>
+    </table></div>;
+}
+function AgentSteps({ steps }) {
+  if (!steps || !steps.length) return <div style={{ font: '11px ' + SANS, color: C.mute }}>No tool calls recorded for this loop.</div>;
+  const t0 = steps[0].ts;
+  return <div className="flex flex-col">{steps.map((x, i) => <div key={i} className="flex gap-2.5" style={{ padding: '5px 0', borderBottom: '1px solid rgba(110,150,190,.07)' }}>
+    <span style={{ flexShrink: 0, font: '9.5px ' + MONO, color: C.dim, width: 42 }}>+{Math.round(x.ts - t0)}s</span>
+    <span style={{ flexShrink: 0, color: x.ok ? C.mint : C.red, font: '11px ' + MONO }}>{x.ok ? '✓' : '✗'}</span>
+    <div className="min-w-0"><div style={{ font: '11.5px/1.45 ' + SANS, color: C.text }}>{x.text}</div><div style={{ font: '9.5px ' + MONO, color: C.dim }}>{x.tool}</div></div></div>)}</div>;
+}
+
 function AgentOps({ g, narrow }) {
   const st = g.state; const S_ = st && st.agent_summary; const K = (S_ && S_.kpis) || {}; const loops = (st && st.loops) || [];
-  const [loopSel, setLoopSel] = React.useState(null); const [trace, setTrace] = React.useState(null); const [node, setNode] = React.useState(null);
+  const [loopSel, setLoopSel] = React.useState(null); const [trace, setTrace] = React.useState(null); const [node, setNode] = React.useState(null); const [rtab, setRtab] = React.useState('story');
   const sel = loopSel || (loops.find(l => l.active) || loops[0] || null);
   const selKey = sel ? sel.kind + '/' + sel.id : null;
   const evHead = st && st.events && st.events[0] && st.events[0].id;
-  React.useEffect(() => { setNode(null); setTrace(null); }, [selKey]);
+  React.useEffect(() => { setNode(null); setTrace(null); setRtab('story'); }, [selKey]);
   React.useEffect(() => { if (!selKey) return; let dead = false; g.api('/api/trace/' + selKey).then(t => { if (!dead) setTrace(t); }).catch(() => { }); return () => { dead = true; }; }, [selKey, evHead]);
   const evs = ((st && st.events) || []).filter(e => !['duplicate_telemetry_suppressed'].includes(e.type)).slice(0, 60);
   const inc = st && st.incident;
@@ -1219,7 +1280,7 @@ function AgentOps({ g, narrow }) {
           <span className={l.active ? 'gp-dot-live' : ''} style={{ width: 6, height: 6, borderRadius: 6, background: l.active ? lc : C.dim }} />
           <span style={{ font: '600 10.5px ' + SANS, color: on ? C.text : C.mute }}>{l.title}</span><span style={{ font: '9.5px ' + MONO, color: C.dim }}>{String(l.state).toLowerCase().replace(/_/g, ' ')}</span></button>; })}
     </div>
-    <div className="flex-1 min-h-0 grid gap-3 p-3" style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(230px, 270px) minmax(0, 1fr) minmax(250px, 300px)', gridAutoRows: narrow ? 'minmax(420px, auto)' : undefined }}>
+    <div className="flex-1 min-h-0 grid gap-3 p-3" style={{ gridTemplateColumns: narrow ? '1fr' : 'minmax(210px, 240px) minmax(0, 1fr) minmax(340px, 420px)', gridAutoRows: narrow ? 'minmax(460px, auto)' : undefined }}>
       <div className="flex flex-col gap-2 min-h-0 min-w-0 overflow-auto">
         <Label>Agent roster</Label>
         {((S_ && S_.roster) || []).map(a => { const active = /running|pending|queued|starting|creating|awaiting|in.?progress|dialing|ringing|peak|charge|alert/i.test(a.status); const lc = LOOP_COLOR[a.loop] || C.mute;
@@ -1235,17 +1296,28 @@ function AgentOps({ g, narrow }) {
           <div style={{ font: '9.5px/1.45 ' + SANS, color: C.dim, marginTop: 6 }}>Humans keep strategic control: the policy engine decides what agents may do alone, and every consequential change waits for a verified person.</div></Panel>
         {inc && <SpecialistsPanel g={g} inc={inc} />}
       </div>
-      <div className="flex flex-col min-h-0 rounded-xl overflow-hidden" style={{ background: 'radial-gradient(ellipse at 30% 20%, rgba(67,217,245,.05), transparent 60%), ' + C.p1, border: '1px solid ' + C.line }}>
-        <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: '1px solid ' + C.line }}>
-          <span className="flex-shrink-0"><Label color={sel ? LOOP_COLOR[sel.loop] : C.dim}>{sel ? sel.loop + ' loop' : 'Decision trace'}</Label></span>
-          <span className="truncate min-w-0" style={{ font: '600 12px ' + SANS, color: C.text }}>{trace ? trace.title : ''}</span>
-          <span className="ml-auto flex items-center gap-3 flex-shrink-0" style={{ font: '9.5px ' + MONO, color: C.dim, whiteSpace: 'nowrap' }}>{[['done', C.mint], ['active', C.cyan], ['failed', C.red]].map(([l, c]) => <span key={l} className="flex items-center gap-1"><span style={{ width: 6, height: 6, borderRadius: 6, background: c }} />{l}</span>)}</span>
+      <div className="flex flex-col min-h-0 gap-3">
+        <div className="flex flex-col min-h-0 rounded-xl overflow-hidden" style={{ flex: '1.25 1 0', minHeight: 240, background: 'radial-gradient(ellipse at 30% 20%, rgba(67,217,245,.05), transparent 60%), ' + C.p1, border: '1px solid ' + C.line }}>
+          <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: '1px solid ' + C.line }}>
+            <span className="flex-shrink-0"><Label color={sel ? LOOP_COLOR[sel.loop] : C.dim}>{sel ? sel.loop + ' loop' : 'Decision trace'}</Label></span>
+            <span className="truncate min-w-0" style={{ font: '600 12px ' + SANS, color: C.text }}>{trace ? trace.title : ''}</span>
+            <span className="ml-auto flex items-center gap-3 flex-shrink-0" style={{ font: '9.5px ' + MONO, color: C.dim, whiteSpace: 'nowrap' }}>click a step for its detail</span>
+          </div>
+          {trace && trace.story && <div className="px-3 py-2 flex items-center gap-2" style={{ borderBottom: '1px solid ' + C.line, background: SSC[trace.story.status] + '0d' }}>
+            <span className={trace.story.status === 'active' ? 'gp-dot-live' : ''} style={{ width: 8, height: 8, borderRadius: 8, background: SSC[trace.story.status], flexShrink: 0 }} />
+            <span style={{ font: '600 12.5px ' + SANS, color: C.text }}>{trace.story.headline}</span></div>}
+          <TraceGraph trace={trace} onSelect={(n) => { setNode(n); setRtab(n && n.tag === 'options' ? 'options' : 'detail'); }} selId={node && node.id} />
         </div>
-        <TraceGraph trace={trace} onSelect={setNode} selId={node && node.id} />
+        {trace && trace.story && trace.story.options && trace.story.options.length > 0 && <Panel className="flex flex-col min-h-0" style={{ flex: '1 1 0', minHeight: 160, padding: 10 }}>
+          <div className="flex items-baseline gap-2 mb-1"><Label>{trace.kind === 'finance' ? 'Every recommendation, cross-checked' : 'Every option the agent tried, and why it lost'}</Label><span style={{ font: '9.5px ' + MONO, color: C.dim }}>{trace.story.options.length} rows · from recorded tool calls</span></div>
+          <div className="flex-1 min-h-0 overflow-auto"><OptionsTable rows={trace.story.options} kind={trace.kind} /></div></Panel>}
       </div>
       <div className="flex flex-col gap-2 min-h-0">
-        <Panel className="overflow-auto" style={{ padding: 12, maxHeight: '55%' }}>
-          {node ? <div className="flex flex-col gap-2">
+        <div className="flex gap-1">{[['story', 'Interpretation'], ['steps', 'Agent steps'], ['detail', 'Step detail'], ['events', 'Live events']].map(([k, l]) => <button key={k} onClick={() => setRtab(k)} className="rounded-full" style={{ font: '600 10.5px ' + SANS, padding: '4px 10px', color: rtab === k ? C.text : C.mute, background: rtab === k ? 'rgba(67,217,245,.12)' : 'transparent', border: '1px solid ' + (rtab === k ? 'rgba(67,217,245,.4)' : C.line), whiteSpace: 'nowrap' }}>{l}</button>)}</div>
+        <Panel className="flex-1 min-h-0 overflow-auto" style={{ padding: 12 }}>
+          {rtab === 'story' && <StoryPanel g={g} trace={trace} sel={sel} />}
+          {rtab === 'steps' && <><Label>What the agent did, call by call</Label><div style={{ font: '10.5px/1.5 ' + SANS, color: C.mute, margin: '3px 0 6px' }}>Each line is a real tool call the CREAO agent made against GRIDPILOT, translated into plain English.</div><AgentSteps steps={trace && trace.story && trace.story.agent_steps} /></>}
+          {rtab === 'detail' && (node ? <div className="flex flex-col gap-2">
             <div className="flex items-center gap-1.5"><Glyph d={(KIND_META[node.kind] || KIND_META.signal)[2]} color={(KIND_META[node.kind] || KIND_META.signal)[1]} /><Label color={(KIND_META[node.kind] || KIND_META.signal)[1]}>{(KIND_META[node.kind] || KIND_META.signal)[0]}</Label><span className="ml-auto" style={{ font: '600 9.5px ' + MONO, color: ST_RING[node.status] }}>{node.status}</span></div>
             <div style={{ font: '600 13px/1.35 ' + SANS, color: C.text }}>{node.title}</div>
             {node.sub && <div style={{ font: '11px/1.45 ' + MONO, color: C.mute }}>{node.sub}</div>}
@@ -1253,13 +1325,11 @@ function AgentOps({ g, narrow }) {
               {[['actor', node.actor], ['time', node.ts ? new Date(node.ts * 1000).toLocaleTimeString() : '—'], ...Object.entries(node.metrics || {})].filter(([, v]) => v != null && v !== '').map(([k, v]) => <React.Fragment key={k}><span style={{ color: C.dim }}>{k}</span><span className="break-all" style={{ color: C.text }}>{String(v)}</span></React.Fragment>)}
             </div>
             {node.detail && <div className="p-2.5 rounded" style={{ background: 'rgba(67,217,245,.05)', border: '1px solid rgba(67,217,245,.18)', font: '11px/1.55 ' + SANS, color: '#c7d6e6', whiteSpace: 'pre-wrap' }}>{node.detail}</div>}
-          </div> : <div style={{ font: '11.5px/1.55 ' + SANS, color: C.mute }}><Label>Inspector</Label><div className="mt-1.5">Click any step in the trace to see who acted, the evidence, the options considered and why one was chosen. Dashed branches are options the agent evaluated; the chosen one is outlined in green.</div></div>}
-        </Panel>
-        <Panel className="flex-1 min-h-0 flex flex-col" style={{ padding: 10 }}><Label>Live event stream</Label>
-          <div className="overflow-auto mt-1.5 flex-1">{evs.map(e => <div key={e.id} className="flex gap-2 items-start" style={{ padding: '3px 0' }}>
+          </div> : <div style={{ font: '11.5px/1.55 ' + SANS, color: C.mute }}>Click a step in the graph to see who acted, when, and the evidence it used.</div>)}
+          {rtab === 'events' && <div className="flex flex-col">{evs.map(e => <div key={e.id} className="flex gap-2 items-start" style={{ padding: '3px 0' }}>
             <span style={{ marginTop: 5, width: 6, height: 6, borderRadius: 6, flexShrink: 0, background: e.type.includes('fail') || e.type.includes('alert') ? C.red : e.actor.startsWith('creao') ? C.cyan : e.actor.startsWith('operator') ? C.amber : e.actor.startsWith('agent:') ? '#7aa2ff' : C.mint }} />
             <div className="min-w-0"><div style={{ font: '500 11px ' + SANS, color: C.text }}>{e.type === 'state_transition' || e.type === 'wo_transition' ? (e.data.work_order ? e.data.work_order + ' ' : '') + e.data.from + ' → ' + e.data.to : e.type === 'agent_tool_call' ? 'CREAO · ' + e.data.tool : e.type.replace(/_/g, ' ')}</div>
-              <div className="truncate" style={{ font: '9.5px ' + MONO, color: C.dim }}>{ago(e.ts)} · {e.actor}{e.data.reason ? ' · ' + e.data.reason : ''}</div></div></div>)}</div>
+              <div className="truncate" style={{ font: '9.5px ' + MONO, color: C.dim }}>{ago(e.ts)} · {e.actor}{e.data.reason ? ' · ' + e.data.reason : ''}</div></div></div>)}</div>}
         </Panel>
       </div>
     </div>
